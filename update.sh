@@ -1,13 +1,13 @@
 #!/bin/bash
 # slicefsm updater
-# Usage: curl -fsSL https://raw.githubusercontent.com/hionpu/contractfirst/main/slicefsm/update.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/hionpu/slicefsm/master/update.sh | bash
 #   --skill-only | --mcp-only | --target ./proj | --cli a,b
 
 set -e
 
 SCRIPT_VERSION="2026-06-09"
-REPO="https://github.com/hionpu/contractfirst"
-RAW="https://raw.githubusercontent.com/hionpu/contractfirst/main/slicefsm"
+REPO="https://github.com/hionpu/slicefsm"
+RAW="https://raw.githubusercontent.com/hionpu/slicefsm/master"
 MCP_DIR="$HOME/.local/share/slicefsm"
 SKILL_ONLY=false
 MCP_ONLY=false
@@ -43,10 +43,10 @@ update_mcp() {
         echo "   $(git -C "$MCP_DIR" log --oneline "$OLD..$NEW" | wc -l | tr -d ' ') new commit(s)"
     fi
     _done=false
-    if has uv && uv pip install -e "$MCP_DIR/slicefsm" --system --quiet 2>/dev/null; then _done=true; fi
+    if has uv && uv pip install -e "$MCP_DIR" --system --quiet 2>/dev/null; then _done=true; fi
     if ! $_done; then
-        if has pip3; then pip3 install -e "$MCP_DIR/slicefsm" --quiet --break-system-packages 2>/dev/null || pip3 install -e "$MCP_DIR/slicefsm" --quiet
-        elif has python3; then python3 -m pip install -e "$MCP_DIR/slicefsm" --quiet --break-system-packages 2>/dev/null || python3 -m pip install -e "$MCP_DIR/slicefsm" --quiet
+        if has pip3; then pip3 install -e "$MCP_DIR" --quiet --break-system-packages 2>/dev/null || pip3 install -e "$MCP_DIR" --quiet
+        elif has python3; then python3 -m pip install -e "$MCP_DIR" --quiet --break-system-packages 2>/dev/null || python3 -m pip install -e "$MCP_DIR" --quiet
         else echo "   no pip/uv"; exit 1; fi
     fi
     echo "   package reinstalled"

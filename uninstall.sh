@@ -1,6 +1,6 @@
 #!/bin/bash
 # slicefsm uninstaller
-# Usage: curl -fsSL https://raw.githubusercontent.com/hionpu/contractfirst/main/slicefsm/uninstall.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/hionpu/slicefsm/master/uninstall.sh | bash
 #   --skill-only | --mcp-only | --target ./proj
 
 set -e

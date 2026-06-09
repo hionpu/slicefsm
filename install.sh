@@ -1,6 +1,6 @@
 #!/bin/bash
 # slicefsm installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/hionpu/contractfirst/main/slicefsm/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/hionpu/slicefsm/master/install.sh | bash
 # Options:
 #   --skill-only        Install skill files only
 #   --mcp-only          Install MCP server + hooks only, skip skill
@@ -12,8 +12,8 @@
 set -e
 
 SCRIPT_VERSION="2026-06-09"
-REPO="https://github.com/hionpu/contractfirst"
-RAW="https://raw.githubusercontent.com/hionpu/contractfirst/main/slicefsm"
+REPO="https://github.com/hionpu/slicefsm"
+RAW="https://raw.githubusercontent.com/hionpu/slicefsm/master"
 SKILL_ONLY=false
 MCP_ONLY=false
 NO_HOOKS=false
@@ -107,13 +107,13 @@ install_mcp() {
     if [[ -d "$MCP_DIR/.git" ]]; then git -C "$MCP_DIR" pull --quiet; else git clone --quiet "$REPO" "$MCP_DIR"; fi
 
     _done=false
-    if has uv && uv pip install -e "$MCP_DIR/slicefsm" --system --quiet 2>/dev/null; then _done=true; fi
+    if has uv && uv pip install -e "$MCP_DIR" --system --quiet 2>/dev/null; then _done=true; fi
     if ! $_done; then
-        if has pip3; then pip3 install -e "$MCP_DIR/slicefsm" --quiet --break-system-packages 2>/dev/null || pip3 install -e "$MCP_DIR/slicefsm" --quiet
-        elif has python3; then python3 -m pip install -e "$MCP_DIR/slicefsm" --quiet --break-system-packages 2>/dev/null || python3 -m pip install -e "$MCP_DIR/slicefsm" --quiet
+        if has pip3; then pip3 install -e "$MCP_DIR" --quiet --break-system-packages 2>/dev/null || pip3 install -e "$MCP_DIR" --quiet
+        elif has python3; then python3 -m pip install -e "$MCP_DIR" --quiet --break-system-packages 2>/dev/null || python3 -m pip install -e "$MCP_DIR" --quiet
         else echo "  Error: no pip/uv"; exit 1; fi
     fi
-    echo "   package -> $MCP_DIR/slicefsm"
+    echo "   package -> $MCP_DIR"
 
     if cli_enabled claude; then
         if has claude; then
@@ -222,4 +222,4 @@ echo "Done. Next:"
 echo "  1. Open your CLI in this directory."
 echo "  2. Describe a feature; the AI calls submit_feature and proposes slices."
 echo "  3. Approve in the terminal:  harness approve   (or: python -m slicefsm.cli approve)"
-echo "Docs: $REPO/tree/main/slicefsm"
+echo "Docs: $REPO"

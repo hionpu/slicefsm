@@ -26,14 +26,14 @@ See `DESIGN - Deterministic Slice Harness.md` for the full model.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hionpu/contractfirst/main/slicefsm/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/hionpu/slicefsm/master/install.sh | bash
 ```
 
 This installs the MCP server, the skill, and — on hook-capable clients (Pi,
 Claude Code, opencode) — the four hooks. Use `--cli pi` to target one client,
 `--skill-only` / `--mcp-only` to limit scope.
 
-Update: `.../slicefsm/update.sh`. Uninstall: `.../slicefsm/uninstall.sh`.
+Update: `.../slicefsm/master/update.sh`. Uninstall: `.../slicefsm/master/uninstall.sh`.
 
 ## State machine
 
