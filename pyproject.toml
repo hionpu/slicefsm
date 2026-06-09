@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slicefsm"
+version = "0.1.0"
+description = "Deterministic slice harness: a hook-enforced FSM that bounds AI tools per state and serves only the current slice's context."
+requires-python = ">=3.11"
+authors = [{ name = "slicefsm" }]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+slicefsm = "slicefsm.server:main"
+slicefsm-hook = "slicefsm.hook:main"
+harness = "slicefsm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
