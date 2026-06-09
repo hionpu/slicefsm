@@ -120,3 +120,17 @@ def test_single_file_module(project):
     ctx = ce.get_slice_context(project, "src/store/db.py")
     assert "src/store/db.py" in ctx["module_files"]
     assert ctx["counts"]["module_files"] == 1
+
+
+def test_folder_module_has_edit_root(project):
+    # GPT issue #5: folder module exposes an edit root so new files are allowed.
+    ctx = ce.get_slice_context(project, "src/ui")
+    assert ctx["edit_roots"] == ["src/ui"]
+    import json
+    man = json.loads(Path(ctx["manifest_path"]).read_text(encoding="utf-8"))
+    assert man["edit_roots"] == ["src/ui"]
+
+
+def test_single_file_module_no_edit_root(project):
+    ctx = ce.get_slice_context(project, "src/store/db.py")
+    assert ctx["edit_roots"] == []

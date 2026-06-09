@@ -205,9 +205,16 @@ def get_slice_context(
 
     excluded = _excluded_modules(root, module_rel | set(dep_files))
 
+    # edit_roots: directories the slice may write within, including NEW files.
+    # A folder module -> the folder; a single-file module -> none (only the file).
+    edit_roots: list[str] = []
+    if (root / module).is_dir():
+        edit_roots = [Path(module).as_posix().strip("/")]
+
     manifest = {
         "module": module,
         "module_files": sorted(module_rel),
+        "edit_roots": edit_roots,
         "dependencies": dependencies,
         "excluded": excluded,
         "depth": depth,
@@ -218,6 +225,7 @@ def get_slice_context(
     return {
         "module": module,
         "module_files": module_bucket,   # rel -> full text (you edit these)
+        "edit_roots": edit_roots,        # dirs you may add new files within
         "dependencies": dependencies,    # signatures only, range preserved
         "excluded": excluded,            # names only
         "manifest_path": str(manifest_path) if manifest_path else None,

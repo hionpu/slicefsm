@@ -39,7 +39,7 @@ PHASE_MCP: dict[str, set[str]] = {
     "SLICING": {"propose_slices"},
     "AWAITING_APPROVAL": {"propose_slices"},
     "SLICE_SCOPING": {"get_slice_context"},
-    "SLICE_IMPLEMENT": {"expand_symbol", "run_verify", "track_manual_checks"},
+    "SLICE_IMPLEMENT": {"expand_symbol", "run_verify", "track_manual_checks", "analyze_verify_failure"},
     "SLICE_VERIFY": {"run_verify", "analyze_verify_failure", "track_manual_checks", "expand_symbol"},
     "STUCK": {"analyze_verify_failure"},
 }
@@ -78,11 +78,21 @@ def _target(tool_input: Any, project_root: str | None = None) -> str | None:
     return Path(str(p)).as_posix()
 
 
-def _in_set(rel: str | None, module_files: list[str] | None) -> bool:
-    if rel is None or not module_files:
+def _in_scope(rel: str | None, module_files: list[str] | None, edit_roots: list[str] | None) -> bool:
+    """A path is in scope if it is an exact module file OR sits under an edit root.
+
+    edit_roots cover NEW files inside the approved module directory.
+    """
+    if rel is None:
         return False
     norm = Path(rel).as_posix()
-    return any(Path(m).as_posix() == norm for m in module_files)
+    if module_files and any(Path(m).as_posix() == norm for m in module_files):
+        return True
+    for r in edit_roots or []:
+        rr = Path(r).as_posix().strip("/")
+        if rr and (norm == rr or norm.startswith(rr + "/")):
+            return True
+    return False
 
 
 def decide(
@@ -91,6 +101,7 @@ def decide(
     tool_input: Any,
     read_mode: str = "strict",
     module_files: list[str] | None = None,
+    edit_roots: list[str] | None = None,
     project_root: str | None = None,
 ) -> tuple[bool, str]:
     """Return (allow, reason). reason is non-empty only on deny."""
@@ -111,17 +122,19 @@ def decide(
             return True, ""
         return False, f"{op} is not allowed in {phase}. Allowed MCP here: {sorted(allowed) or 'none'}."
 
-    # 3. Edit/write: only in implement/verify, only within the slice module.
+    # 3. Edit/write: only in implement/verify, only within the slice scope
+    #    (existing module files OR new files under an edit root).
     if t in _EDIT_TOOLS:
         if phase not in ("SLICE_IMPLEMENT", "SLICE_VERIFY"):
             return False, f"edits are not allowed in {phase}."
         rel = _target(tool_input, project_root)
-        if module_files is None:
+        if module_files is None and not edit_roots:
             return False, "no slice context loaded; call get_slice_context first."
-        if _in_set(rel, module_files):
+        if _in_scope(rel, module_files, edit_roots):
             return True, ""
+        allowed = edit_roots or sorted(module_files or [])
         return False, (
-            f"'{rel}' is outside the slice module. Edit only: {sorted(module_files)}. "
+            f"'{rel}' is outside the slice module. Allowed scope: {allowed}. "
             "For an out-of-module change, stop and get human approval."
         )
 
@@ -129,7 +142,8 @@ def decide(
     if t in _READ_TOOLS:
         if phase in ("SLICE_IMPLEMENT", "SLICE_VERIFY", "STUCK"):
             rel = _target(tool_input, project_root)
-            if module_files and rel and not _in_set(rel, module_files):
+            in_scope = _in_scope(rel, module_files, edit_roots)
+            if rel and not in_scope:
                 if phase == "STUCK" or read_mode == "strict":
                     return False, (
                         f"strict read: '{rel}' is outside the slice. Use expand_symbol for a "
@@ -146,17 +160,19 @@ def decide(
 # ── IO / dispatch ──────────────────────────────────────────────────
 
 
-def _module_files(s: dict[str, Any], project_root: str) -> list[str] | None:
+def _manifest_scope(s: dict[str, Any]) -> tuple[list[str] | None, list[str]]:
+    """Return (module_files, edit_roots) from the current slice's manifest."""
     cs = state.current_slice(s)
     manifest = cs.get("manifest") if cs else None
     if not manifest:
-        return None
+        return None, []
     try:
         man = json.loads(Path(manifest).read_text(encoding="utf-8"))
-        mf = man.get("module_files")
-        return mf if isinstance(mf, list) else None
     except (OSError, json.JSONDecodeError):
-        return None
+        return None, []
+    mf = man.get("module_files")
+    er = man.get("edit_roots")
+    return (mf if isinstance(mf, list) else None, er if isinstance(er, list) else [])
 
 
 def build_state_prompt(s: dict[str, Any]) -> str:
@@ -175,7 +191,7 @@ def build_state_prompt(s: dict[str, Any]) -> str:
         "SLICING": "SLICING. Split the feature into vertical, user-visible slices. No edits. Call propose_slices(slices).",
         "AWAITING_APPROVAL": "AWAITING_APPROVAL. Slices are proposed. Only the human can approve (out-of-band: harness approve). Do not start implementing.",
         "SLICE_SCOPING": "SLICE_SCOPING.{slice} First action: get_slice_context(module). No edits until the context is loaded.",
-        "SLICE_IMPLEMENT": "SLICE_IMPLEMENT.{slice} Edit only within the loaded module. For a dependency body, call expand_symbol — do not read the whole file. When verify_how is satisfiable, call run_verify.",
+        "SLICE_IMPLEMENT": "SLICE_IMPLEMENT.{slice} Edit only within the loaded module (new files inside it are fine). For a dependency body, call expand_symbol — do not read the whole file. When verify_how is satisfiable, call run_verify. If verify just failed, call analyze_verify_failure before re-editing.",
         "SLICE_VERIFY": "SLICE_VERIFY.{slice} Run run_verify. On failure, call analyze_verify_failure before patching.",
         "STUCK": "STUCK.{slice} Verify failed repeatedly. STOP editing. Diagnose only (analyze_verify_failure), then ask the human to run: harness unstick.",
         "FEATURE_DONE": "FEATURE_DONE. The feature is closed. Start a new one with submit_feature.",
@@ -205,13 +221,14 @@ def _handle_pretooluse(project_root: str, event: dict[str, Any]) -> int:
     s = state.read(project_root)
     phase = s.get("phase", "NO_FEATURE")
     read_mode = (s.get("read_policy") or {}).get("mode", "strict")
-    module_files = _module_files(s, project_root)
+    module_files, edit_roots = _manifest_scope(s)
     allow, reason = decide(
         phase,
         event.get("tool_name", ""),
         event.get("tool_input", {}),
         read_mode=read_mode,
         module_files=module_files,
+        edit_roots=edit_roots,
         project_root=project_root,
     )
     if not allow:

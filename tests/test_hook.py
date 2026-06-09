@@ -103,6 +103,26 @@ def test_read_in_readonly_phase_allowed():
     assert allow is True
 
 
+def test_new_file_in_module_dir_allowed():
+    # GPT issue #5: a new file under the approved module dir must be writable.
+    allow, _ = hook.decide("SLICE_IMPLEMENT", "Write", {"file_path": "src/ui/new.py"},
+                           module_files=[], edit_roots=["src/ui"])
+    assert allow is True
+
+
+def test_new_file_outside_edit_root_denied():
+    allow, reason = hook.decide("SLICE_IMPLEMENT", "Write", {"file_path": "src/other/new.py"},
+                                module_files=[], edit_roots=["src/ui"])
+    assert allow is False
+    assert "outside the slice" in reason
+
+
+def test_read_new_file_in_module_dir_allowed_strict():
+    allow, _ = hook.decide("SLICE_IMPLEMENT", "Read", {"file_path": "src/ui/helper.py"},
+                           read_mode="strict", module_files=[], edit_roots=["src/ui"])
+    assert allow is True
+
+
 def test_unknown_tool_allowed():
     allow, _ = hook.decide("SLICE_IMPLEMENT", "Glob", {"pattern": "**/*.py"})
     assert allow is True

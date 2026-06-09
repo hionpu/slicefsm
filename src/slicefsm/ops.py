@@ -186,6 +186,18 @@ def get_slice_context(project_root: str, module: str, depth: int = 1, feature: s
     if s.get("phase") != "SLICE_SCOPING":
         return {"error": "transition_denied", "current_phase": s.get("phase"), "expected_phase": "SLICE_SCOPING"}
 
+    # The human approved a module per slice. The AI may scope equal-or-narrower,
+    # but cannot silently swap to a different/broader module.
+    cs0 = state.current_slice(s)
+    approved = (cs0 or {}).get("module")
+    if approved:
+        a = approved.replace("\\", "/").strip("/")
+        m = module.replace("\\", "/").strip("/")
+        if not (m == a or m.startswith(a + "/")):
+            return {"error": "module_mismatch", "approved_module": approved, "requested": module,
+                    "reason": "requested module is outside the human-approved slice module. "
+                              "Use `harness reslice` to change scope."}
+
     ctx = context_engine.get_slice_context(project_root, module, depth=depth, write_manifest=True)
     ckpt = git_util.make_checkpoint(project_root)
 
@@ -242,11 +254,25 @@ def run_verify(project_root: str, feature: str | None = None) -> dict[str, Any]:
                 "expected_phase": ["SLICE_IMPLEMENT", "SLICE_VERIFY"]}
 
     result = verify.run_verify_suite(project_root)
-    overall = result["overall"]
-    if feature and overall in ("pass", "no_checks"):
+    automatic = result["overall"]  # pass | fail | no_checks
+
+    manual_required = manual_pending = 0
+    if feature:
         mc = manual_checks.summary(project_root, feature)
-        if mc["pending"] > 0:
-            overall = "pending_manual"
+        manual_required, manual_pending = mc["required"], mc["pending"]
+
+    # Resolve the outcome. "no_checks" must NOT count as a pass on its own —
+    # a slice with no automatic and no manual check cannot be "verified".
+    if automatic == "fail":
+        overall = "fail"
+    elif manual_pending > 0:
+        overall = "pending_manual"
+    elif automatic == "pass":
+        overall = "pass"
+    elif manual_required > 0:
+        overall = "pass"  # no automatic checks, but all manual checks confirmed
+    else:
+        overall = "no_checks"
 
     # Step 1: ensure we are in SLICE_VERIFY.
     if cur == "SLICE_IMPLEMENT":
@@ -287,6 +313,14 @@ def run_verify(project_root: str, feature: str | None = None) -> dict[str, Any]:
         state.write(project_root, s)
         return {"overall": "pending_manual", "phase": "SLICE_VERIFY",
                 "pending_manual_checks": manual_checks.pending_items(project_root, feature) if feature else [],
+                "result": result}
+
+    # No checks at all: not verified — do not advance.
+    if overall == "no_checks":
+        state.write(project_root, s)
+        return {"overall": "no_checks", "phase": "SLICE_VERIFY",
+                "guidance": "Nothing verified this slice. Add a verify.sh or a test, or declare a "
+                            "manual check via track_manual_checks, then call run_verify again.",
                 "result": result}
 
     # Pass. Explanation gate on the last slice (Medium+ / risky).
@@ -338,9 +372,11 @@ def analyze_verify_failure(
     contract_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     s = state.read(project_root)
-    if s.get("phase") not in ("SLICE_VERIFY", "STUCK"):
+    # Also allowed in SLICE_IMPLEMENT: run_verify drops back there on a fail,
+    # and the AI must be able to diagnose before patching.
+    if s.get("phase") not in ("SLICE_IMPLEMENT", "SLICE_VERIFY", "STUCK"):
         return {"error": "transition_denied", "current_phase": s.get("phase"),
-                "expected_phase": ["SLICE_VERIFY", "STUCK"]}
+                "expected_phase": ["SLICE_IMPLEMENT", "SLICE_VERIFY", "STUCK"]}
     out = failure.analyze_verify_failure(failed_step, suspect_paths, contract_paths)
     gatelog.append_gate_event(project_root, "analyze_verify_failure", out)
     return out

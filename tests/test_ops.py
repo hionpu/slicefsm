@@ -169,6 +169,50 @@ def test_expand_symbol_phase_gate(project):
     assert out["error"] == "transition_denied"
 
 
+def test_no_checks_does_not_advance(project, monkeypatch):
+    # GPT issue #2: no automatic and no manual check must not count as verified.
+    monkeypatch.setattr(verify, "run_verify_suite", lambda *a, **k: {"overall": "no_checks", "steps": []})
+    ops.submit_feature(str(project), "tiny")
+    ops.propose_slices(str(project), [
+        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
+    ])
+    _approve(project, "Micro", current=1)
+    ops.get_slice_context(str(project), "src/a.py")
+    out = ops.run_verify(str(project))
+    assert out["overall"] == "no_checks"
+    assert out["phase"] == "SLICE_VERIFY"  # did NOT advance or finish
+
+
+def test_analyze_reachable_after_fail(project, monkeypatch):
+    # GPT issue #3: a fail drops to SLICE_IMPLEMENT; analyze must still work there.
+    _fail(monkeypatch)
+    ops.submit_feature(str(project), "tiny")
+    ops.propose_slices(str(project), [
+        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
+    ])
+    _approve(project, "Micro", current=1)
+    ops.get_slice_context(str(project), "src/a.py")
+    o1 = ops.run_verify(str(project))
+    assert o1["phase"] == "SLICE_IMPLEMENT"
+    a = ops.analyze_verify_failure(str(project), "test")
+    assert "classification" in a and "error" not in a
+
+
+def test_module_mismatch_denied(project, monkeypatch):
+    # GPT issue #4: AI cannot swap the human-approved module.
+    _pass(monkeypatch)
+    ops.submit_feature(str(project), "tiny")
+    ops.propose_slices(str(project), [
+        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
+    ])
+    _approve(project, "Micro", current=1)
+    out = ops.get_slice_context(str(project), "src/b.py")  # different module
+    assert out["error"] == "module_mismatch"
+    assert out["approved_module"] == "src/a.py"
+    ok = ops.get_slice_context(str(project), "src/a.py")  # approved one works
+    assert ok["phase"] == "SLICE_IMPLEMENT"
+
+
 def test_manual_checks_block_pass(project, monkeypatch):
     _pass(monkeypatch)
     ops.submit_feature(str(project), "tiny")
