@@ -37,15 +37,17 @@ Update: `.../slicefsm/master/update.sh`. Uninstall: `.../slicefsm/master/uninsta
 
 ## State machine
 
+A repo holds several features; one is active. The active feature's phase:
+
 ```
 NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL → IN_PROGRESS → FEATURE_DONE
 
-IN_PROGRESS holds N slices, each with its own status (run in parallel):
+IN_PROGRESS holds N slices, implemented one at a time (sequential):
   proposed → implement ⇄ (run_verify) → done
   implement → stuck (N fails) → (harness unstick) → implement
 ```
 
-One slice per session; any session can start a new slice or resume a paused one.
+`harness pause` / `resume <id>` / `switch <id>` move between features (clean git tree required).
 
 ## Components
 

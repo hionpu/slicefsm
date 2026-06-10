@@ -121,34 +121,40 @@ def test_module_mismatch_denied(project, monkeypatch):
 # ── parallel + resume ──────────────────────────────────────────────
 
 
-def test_parallel_slices_finish_in_any_order(project, monkeypatch):
+def test_slices_are_sequential(project, monkeypatch):
     _pass(monkeypatch)
     _three(project)
     _approve(project, "Medium")
-
-    # two slices active at once
     ops.get_slice_context(str(project), 1)
-    ops.get_slice_context(str(project), 2)
-    ls = ops.list_slices(str(project))
-    active = {x["id"] for x in ls["slices"] if x["status"] == "implement"}
-    assert active == {1, 2}
+    # cannot start another slice while one is in progress
+    out = ops.get_slice_context(str(project), 2)
+    assert out["error"] == "another_slice_active"
+    assert out["active_slice"] == 1
+    # finish slice 1, then slice 2 may start
+    ops.run_verify(str(project), 1)
+    assert ops.get_slice_context(str(project), 2)["slice_status"] == "implement"
 
-    # finish slice 2 before slice 1 — order independent
-    out2 = ops.run_verify(str(project), 2)
-    assert out2["slice_status"] == "done"
-    assert out2["feature_phase"] == "IN_PROGRESS"  # not all done yet
 
-    out1 = ops.run_verify(str(project), 1)
-    assert out1["slice_status"] == "done"
-
-    # last slice triggers the explanation gate (Medium)
+def test_last_slice_explanation_gate(project, monkeypatch):
+    _pass(monkeypatch)
+    _three(project)
+    _approve(project, "Medium")
+    for sid in (1, 2):
+        ops.get_slice_context(str(project), sid)
+        ops.run_verify(str(project), sid)
     ops.get_slice_context(str(project), 3)
-    out3 = ops.run_verify(str(project), 3)
-    assert out3["overall"] == "pending_explanation"
+    out = ops.run_verify(str(project), 3)
+    assert out["overall"] == "pending_explanation"
     s = state.read(project)
-    state.find_slice(s, 3)["explanation"] = ".harness/explain-3.md"
+    state.find_slice(s, 3)["explanation"] = ".harness/x.md"
     state.write(project, s)
     assert ops.run_verify(str(project), 3)["feature_phase"] == "FEATURE_DONE"
+
+
+def test_submit_while_active_denied(project):
+    ops.submit_feature(str(project), "first feature")
+    out = ops.submit_feature(str(project), "second feature")
+    assert out["error"] == "active_feature_exists"
 
 
 def test_resume_paused_slice(project, monkeypatch):

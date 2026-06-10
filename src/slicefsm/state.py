@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,11 +22,13 @@ from typing import Any, Callable
 
 STATE_DIRNAME = ".harness"
 STATE_FILENAME = "state.json"
-STATE_VERSION = 2
+STATE_VERSION = 3
 
-# Feature-level phases. Individual slices carry their own status (below) so
-# that several slices can be in progress at once.
+# A repo holds many features; one is active at a time. Each feature carries its
+# own phase below. NO_ACTIVE_FEATURE is a root condition (no feature is active),
+# surfaced as a synthetic feature phase so callers can gate on it uniformly.
 PHASES = (
+    "NO_ACTIVE_FEATURE",
     "NO_FEATURE",
     "DISCOVERY",
     "SLICING",
@@ -34,7 +37,7 @@ PHASES = (
     "FEATURE_DONE",
 )
 
-# Per-slice status (parallel): many slices may be `implement` at the same time.
+# Per-slice status. Slices are sequential: at most one is `implement` at a time.
 SLICE_STATUSES = ("proposed", "implement", "stuck", "done")
 
 # from_phase -> set of legal to_phases (feature level)
@@ -80,10 +83,9 @@ def state_path(project_root: str | Path) -> Path:
     return Path(project_root).resolve() / STATE_DIRNAME / STATE_FILENAME
 
 
-def new_state() -> dict[str, Any]:
-    """A fresh NO_FEATURE state."""
+def new_feature_state() -> dict[str, Any]:
+    """A blank single-feature state (phase NO_FEATURE)."""
     return {
-        "version": STATE_VERSION,
         "phase": "NO_FEATURE",
         "feature": None,
         "scale": None,
@@ -94,34 +96,69 @@ def new_state() -> dict[str, Any]:
         "read_policy": None,
         "discovery_summary": None,
         "slices": [],
+        "paused": False,
         "approved": None,
         "updated_at": _now(),
     }
 
 
-def read(project_root: str | Path) -> dict[str, Any]:
-    """Read state, or return a fresh NO_FEATURE state if absent/corrupt."""
+# Back-compat alias (used by tests and a few callers).
+new_state = new_feature_state
+
+
+def new_root() -> dict[str, Any]:
+    """A fresh repo state: no features yet."""
+    return {"version": STATE_VERSION, "active_feature_id": None, "features": {}}
+
+
+def _no_active() -> dict[str, Any]:
+    """Synthetic feature-state returned when no feature is active."""
+    s = new_feature_state()
+    s["phase"] = "NO_ACTIVE_FEATURE"
+    return s
+
+
+def feature_dir(project_root: str | Path, feature_id: str | None) -> Path:
+    """Per-feature artifact directory: .harness/features/<id>/."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", str(feature_id or "feature")).strip("-") or "feature"
+    return Path(project_root).resolve() / STATE_DIRNAME / "features" / safe
+
+
+# ── root-level IO ──────────────────────────────────────────────────
+
+
+def read_root(project_root: str | Path) -> dict[str, Any]:
+    """Read the full repo state, migrating older single-feature files."""
     path = state_path(project_root)
     if not path.exists():
-        return new_state()
+        return new_root()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return new_state()
-    if not isinstance(data, dict) or "phase" not in data:
-        return new_state()
-    return data
+        return new_root()
+    if not isinstance(data, dict):
+        return new_root()
+    if "features" in data and isinstance(data["features"], dict):
+        data.setdefault("active_feature_id", None)
+        data.setdefault("version", STATE_VERSION)
+        return data
+    # Migrate a v1/v2 flat feature-state into the multi-feature shape.
+    if "phase" in data:
+        fid = (data.get("feature") or {}).get("id") or "legacy"
+        data.pop("version", None)
+        return {"version": STATE_VERSION, "active_feature_id": fid, "features": {fid: data}}
+    return new_root()
 
 
-def write(project_root: str | Path, state: dict[str, Any]) -> Path:
-    """Write state atomically. Stamps updated_at."""
+def write_root(project_root: str | Path, root_state: dict[str, Any]) -> Path:
+    """Write the full repo state atomically."""
     path = state_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    state["updated_at"] = _now()
+    root_state["version"] = STATE_VERSION
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, ensure_ascii=False, indent=2)
+            json.dump(root_state, fh, ensure_ascii=False, indent=2)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_name, path)
@@ -132,6 +169,33 @@ def write(project_root: str | Path, state: dict[str, Any]) -> Path:
             except OSError:
                 pass
     return path
+
+
+def active_feature(root_state: dict[str, Any]) -> dict[str, Any] | None:
+    fid = root_state.get("active_feature_id")
+    if fid and fid in root_state.get("features", {}):
+        return root_state["features"][fid]
+    return None
+
+
+# ── active-feature IO (most callers use these unchanged) ───────────
+
+
+def read(project_root: str | Path) -> dict[str, Any]:
+    """Return the ACTIVE feature's state, or a NO_ACTIVE_FEATURE sentinel."""
+    fs = active_feature(read_root(project_root))
+    return fs if fs is not None else _no_active()
+
+
+def write(project_root: str | Path, feature_state: dict[str, Any]) -> Path:
+    """Write `feature_state` back into the active feature slot."""
+    rs = read_root(project_root)
+    fid = rs.get("active_feature_id") or (feature_state.get("feature") or {}).get("id")
+    if fid:
+        feature_state["updated_at"] = _now()
+        rs.setdefault("features", {})[fid] = feature_state
+        rs.setdefault("active_feature_id", fid)
+    return write_root(project_root, rs)
 
 
 def transition(

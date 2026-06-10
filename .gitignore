@@ -9,3 +9,6 @@ __pycache__/
 venv/
 dist/
 build/
+
+out.txt
+pi-session-*.html

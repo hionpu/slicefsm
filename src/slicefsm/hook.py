@@ -37,6 +37,7 @@ MCP_OPS = {
 # so all slice tools are allowed there; per-slice preconditions are enforced by
 # the tools themselves.
 PHASE_MCP: dict[str, set[str]] = {
+    "NO_ACTIVE_FEATURE": {"submit_feature"},
     "NO_FEATURE": {"submit_feature"},
     "FEATURE_DONE": {"submit_feature"},
     "DISCOVERY": {"propose_slices"},
@@ -50,7 +51,7 @@ _READ_TOOLS = {"read", "cat", "view"}
 _SHELL_TOOLS = {"bash", "shell", "sh", "powershell", "pwsh", "cmd"}
 # Human-only state changes. Matched broadly so the module form
 # (`python -m slicefsm.cli approve`) is caught too, not just `harness approve`.
-_HUMAN_ONLY_VERBS = ("approve", "explain", "unstick", "reslice")
+_HUMAN_ONLY_VERBS = ("approve", "explain", "unstick", "reslice", "pause", "resume", "switch", "cancel")
 _CLI_MARKERS = ("harness", "slicefsm.cli")
 
 
@@ -217,6 +218,7 @@ def build_state_prompt(s: dict[str, Any]) -> str:
         return f"[slicefsm] {text}"
 
     base = {
+        "NO_ACTIVE_FEATURE": "No active feature. Call submit_feature(desc) to start one, or the human runs `harness resume <id>` / `harness list`. No edits.",
         "NO_FEATURE": "No active feature. To start, call submit_feature(desc). No edits until a feature is sliced and approved.",
         "DISCOVERY": "DISCOVERY (read-only). Scan the code to understand structure. No edits. When ready, call propose_slices(slices, discovery_summary=...).",
         "SLICING": "SLICING. Split the feature into vertical, user-visible slices. No edits. Call propose_slices(slices).",
@@ -273,7 +275,8 @@ def _handle_posttooluse(project_root: str, event: dict[str, Any]) -> int:
         if t in _EDIT_TOOLS:
             rel = _target(event.get("tool_input", {}), project_root)
             if rel:
-                edits.append_edit(project_root, _slice_for_path(s, rel), rel, t)
+                fid = (s.get("feature") or {}).get("id")
+                edits.append_edit(project_root, fid, _slice_for_path(s, rel), rel, t)
     return 0
 
 

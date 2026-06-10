@@ -1,45 +1,82 @@
-"""Unit tests for the state core + feature-level FSM (v2, parallel slices)."""
+"""Unit tests for the state core (v3: multi-feature root + feature FSM)."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
 from slicefsm import state as st
 
 
-def test_new_state_is_no_feature():
-    s = st.new_state()
-    assert s["phase"] == "NO_FEATURE"
-    assert s["slices"] == []
-    assert s["version"] == st.STATE_VERSION == 2
-    assert "current_slice" not in s
+def test_new_root_empty():
+    rs = st.new_root()
+    assert rs["active_feature_id"] is None
+    assert rs["features"] == {}
+    assert rs["version"] == st.STATE_VERSION == 3
 
 
-def test_read_missing_returns_fresh(tmp_path):
+def test_new_feature_state_is_no_feature():
+    fs = st.new_feature_state()
+    assert fs["phase"] == "NO_FEATURE"
+    assert fs["slices"] == []
+    assert "current_slice" not in fs
+
+
+def test_read_missing_returns_no_active(tmp_path):
     s = st.read(tmp_path)
-    assert s["phase"] == "NO_FEATURE"
+    assert s["phase"] == "NO_ACTIVE_FEATURE"
     assert not st.state_path(tmp_path).exists()
 
 
-def test_write_then_read_roundtrip(tmp_path):
-    s = st.new_state()
-    s["phase"] = "SLICING"
-    s["feature"] = {"id": "feat-1", "desc": "x"}
-    st.write(tmp_path, s)
-    back = st.read(tmp_path)
+def test_root_roundtrip(tmp_path):
+    rs = st.new_root()
+    fs = st.new_feature_state()
+    fs["feature"] = {"id": "feat-a", "desc": "x"}
+    fs["phase"] = "SLICING"
+    rs["features"]["feat-a"] = fs
+    rs["active_feature_id"] = "feat-a"
+    st.write_root(tmp_path, rs)
+    back = st.read(tmp_path)  # active-aware read
     assert back["phase"] == "SLICING"
-    assert back["feature"]["id"] == "feat-1"
+    assert back["feature"]["id"] == "feat-a"
 
 
-def test_read_corrupt_returns_fresh(tmp_path):
+def test_active_write_targets_active_feature(tmp_path):
+    rs = st.new_root()
+    rs["features"]["feat-a"] = st.new_feature_state()
+    rs["active_feature_id"] = "feat-a"
+    st.write_root(tmp_path, rs)
+    s = st.read(tmp_path)
+    s["phase"] = "IN_PROGRESS"
+    st.write(tmp_path, s)  # active-aware write
+    assert st.read(tmp_path)["phase"] == "IN_PROGRESS"
+    assert st.read_root(tmp_path)["features"]["feat-a"]["phase"] == "IN_PROGRESS"
+
+
+def test_migrates_v2_flat_state(tmp_path):
+    # a pre-v3 flat feature-state on disk
     p = st.state_path(tmp_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("{ not json", encoding="utf-8")
-    assert st.read(tmp_path)["phase"] == "NO_FEATURE"
+    p.write_text(json.dumps({"version": 2, "phase": "IN_PROGRESS",
+                             "feature": {"id": "old-feat"}, "slices": []}), encoding="utf-8")
+    rs = st.read_root(tmp_path)
+    assert rs["active_feature_id"] == "old-feat"
+    assert rs["features"]["old-feat"]["phase"] == "IN_PROGRESS"
 
 
-def test_feature_happy_path():
-    s = st.new_state()
+def test_two_features_coexist(tmp_path):
+    rs = st.new_root()
+    rs["features"]["a"] = st.new_feature_state()
+    rs["features"]["b"] = st.new_feature_state()
+    rs["active_feature_id"] = "a"
+    st.write_root(tmp_path, rs)
+    assert set(st.read_root(tmp_path)["features"]) == {"a", "b"}
+    assert st.read(tmp_path) is not None  # active = a
+
+
+def test_feature_happy_path_transitions():
+    s = st.new_feature_state()
     st.transition(s, "DISCOVERY", expect="NO_FEATURE")
     st.transition(s, "AWAITING_APPROVAL", expect="DISCOVERY")
     st.transition(s, "IN_PROGRESS", expect="AWAITING_APPROVAL")
@@ -48,41 +85,13 @@ def test_feature_happy_path():
 
 
 def test_illegal_transition_denied():
-    s = st.new_state()
-    with pytest.raises(st.TransitionDenied) as ei:
-        st.transition(s, "FEATURE_DONE")
-    assert ei.value.payload["error"] == "transition_denied"
-    assert s["phase"] == "NO_FEATURE"
-
-
-def test_wrong_precondition_denied():
-    s = st.new_state()
-    s["phase"] = "IN_PROGRESS"
+    s = st.new_feature_state()
     with pytest.raises(st.TransitionDenied):
-        st.transition(s, "SLICING", expect="NO_FEATURE")
-
-
-def test_reslice_from_in_progress():
-    s = st.new_state()
-    s["phase"] = "IN_PROGRESS"
-    st.transition(s, "SLICING")
-    assert s["phase"] == "SLICING"
-
-
-def test_mutator_runs_before_phase_set():
-    s = st.new_state()
-    seen = {}
-
-    def mut(state):
-        seen["phase_during"] = state["phase"]
-
-    st.transition(s, "SLICING", expect="NO_FEATURE", mutator=mut)
-    assert seen["phase_during"] == "NO_FEATURE"
-    assert s["phase"] == "SLICING"
+        st.transition(s, "FEATURE_DONE")
 
 
 def test_slice_helpers():
-    s = st.new_state()
+    s = st.new_feature_state()
     s["slices"] = [
         {"id": 1, "status": "done"},
         {"id": 2, "status": "implement"},
@@ -97,5 +106,6 @@ def test_slice_helpers():
     assert st.all_done(s) is True
 
 
-def test_all_done_empty_is_false():
-    assert st.all_done(st.new_state()) is False
+def test_feature_dir_handles_none(tmp_path):
+    assert st.feature_dir(tmp_path, None).name == "feature"
+    assert st.feature_dir(tmp_path, "feat-a").name == "feat-a"

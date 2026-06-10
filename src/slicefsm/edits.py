@@ -22,9 +22,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _append(root: str | Path, filename: str, entry: dict[str, Any]) -> None:
+def _append(root: str | Path, feature_id: str, filename: str, entry: dict[str, Any]) -> None:
+    # Per-feature: slice ids restart at 1 in each feature, so logs must not mix.
+    from . import state
+
     try:
-        d = Path(root).resolve() / STATE_DIRNAME
+        d = state.feature_dir(root, feature_id)
         d.mkdir(parents=True, exist_ok=True)
         with (d / filename).open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -32,16 +35,18 @@ def _append(root: str | Path, filename: str, entry: dict[str, Any]) -> None:
         pass
 
 
-def append_edit(root: str | Path, slice_id: Any, path: str, tool: str) -> None:
-    _append(root, EDITS_FILENAME, {"ts": _now(), "slice_id": slice_id, "path": path, "tool": tool})
+def append_edit(root: str | Path, feature_id: str, slice_id: Any, path: str, tool: str) -> None:
+    _append(root, feature_id, EDITS_FILENAME, {"ts": _now(), "slice_id": slice_id, "path": path, "tool": tool})
 
 
-def append_expand(root: str | Path, slice_id: Any, symbol: str, reason: str | None) -> None:
-    _append(root, EXPANDS_FILENAME, {"ts": _now(), "slice_id": slice_id, "symbol": symbol, "reason": reason})
+def append_expand(root: str | Path, feature_id: str, slice_id: Any, symbol: str, reason: str | None) -> None:
+    _append(root, feature_id, EXPANDS_FILENAME, {"ts": _now(), "slice_id": slice_id, "symbol": symbol, "reason": reason})
 
 
-def _read_lines(root: str | Path, filename: str) -> list[dict[str, Any]]:
-    p = Path(root).resolve() / STATE_DIRNAME / filename
+def _read_lines(root: str | Path, feature_id: str, filename: str) -> list[dict[str, Any]]:
+    from . import state
+
+    p = state.feature_dir(root, feature_id) / filename
     if not p.exists():
         return []
     out: list[dict[str, Any]] = []
@@ -55,12 +60,12 @@ def _read_lines(root: str | Path, filename: str) -> list[dict[str, Any]]:
     return out
 
 
-def authorship(root: str | Path, slice_id: Any) -> dict[str, Any]:
+def authorship(root: str | Path, feature_id: str, slice_id: Any) -> dict[str, Any]:
     """AI edit count for the slice + total git diff size. Surfaced only."""
     from . import git_util
 
-    ai_edits = sum(1 for e in _read_lines(root, EDITS_FILENAME) if e.get("slice_id") == slice_id)
-    expands = sum(1 for e in _read_lines(root, EXPANDS_FILENAME) if e.get("slice_id") == slice_id)
+    ai_edits = sum(1 for e in _read_lines(root, feature_id, EDITS_FILENAME) if e.get("slice_id") == slice_id)
+    expands = sum(1 for e in _read_lines(root, feature_id, EXPANDS_FILENAME) if e.get("slice_id") == slice_id)
     diff = git_util.diff_numstat(root) if git_util.is_git_repo(root) else {"files": [], "lines_added": 0}
     return {
         "ai_edits": ai_edits,

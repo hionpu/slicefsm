@@ -30,6 +30,18 @@ def test_status_command_allowed():
 # ── decide(): MCP gating by feature phase ──────────────────────────
 
 
+def test_no_active_feature_gating():
+    assert hook.decide("NO_ACTIVE_FEATURE", "mcp__slicefsm__submit_feature", {})[0] is True
+    assert hook.decide("NO_ACTIVE_FEATURE", "mcp__slicefsm__get_slice_context", {})[0] is False
+    assert hook.decide("NO_ACTIVE_FEATURE", "Edit", {"file_path": "x.py"})[0] is False
+
+
+def test_pause_switch_blocked():
+    assert hook.decide("IN_PROGRESS", "bash", {"command": "harness pause"})[0] is False
+    assert hook.decide("IN_PROGRESS", "bash", {"command": "harness switch feat-b"})[0] is False
+    assert hook.decide("NO_ACTIVE_FEATURE", "bash", {"command": "harness resume feat-a"})[0] is False
+
+
 def test_mcp_gating_by_phase():
     assert hook.decide("NO_FEATURE", "mcp__slicefsm__submit_feature", {})[0] is True
     assert hook.decide("NO_FEATURE", "mcp__slicefsm__get_slice_context", {})[0] is False
@@ -144,14 +156,17 @@ def test_handle_userpromptsubmit_injects_context(tmp_path, capsys):
 
 
 def test_handle_posttooluse_logs_edit_with_slice(tmp_path):
-    # Manifest for an active slice so the edit is attributed to it.
     man = tmp_path / ".harness" / "m.json"
     man.parent.mkdir(parents=True, exist_ok=True)
     man.write_text(json.dumps({"module_files": ["src/a.py"], "edit_roots": ["src"]}), encoding="utf-8")
-    s = state.new_state()
-    s["phase"] = "IN_PROGRESS"
-    s["slices"] = [{"id": 1, "title": "t", "module": "src", "status": "implement", "manifest": str(man)}]
-    state.write(tmp_path, s)
+    rs = state.new_root()
+    fs = state.new_feature_state()
+    fs["phase"] = "IN_PROGRESS"
+    fs["feature"] = {"id": "feat-x"}
+    fs["slices"] = [{"id": 1, "title": "t", "module": "src", "status": "implement", "manifest": str(man)}]
+    rs["features"]["feat-x"] = fs
+    rs["active_feature_id"] = "feat-x"
+    state.write_root(tmp_path, rs)
     hook._handle_posttooluse(str(tmp_path), {"tool_name": "edit", "tool_input": {"file_path": "src/a.py"}})
-    log = (tmp_path / ".harness" / "edits.log").read_text(encoding="utf-8")
+    log = (state.feature_dir(tmp_path, "feat-x") / "edits.log").read_text(encoding="utf-8")
     assert "src/a.py" in log and '"slice_id": 1' in log

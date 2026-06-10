@@ -48,36 +48,38 @@ def _effective_scale(s: dict[str, Any]) -> str:
     )
 
 
+def _fid(s: dict[str, Any]) -> str | None:
+    """The active feature's id (used to namespace artifacts/logs)."""
+    return (s.get("feature") or {}).get("id")
+
+
 # ── submit_feature ─────────────────────────────────────────────────
 
 
 def submit_feature(project_root: str, desc: str) -> dict[str, Any]:
-    s = state.read(project_root)
+    """Create a new feature and make it active. Refused while one is active."""
+    rs = state.read_root(project_root)
+    if rs.get("active_feature_id"):
+        return {"error": "active_feature_exists", "active_feature": rs["active_feature_id"],
+                "reason": "Pause the current feature first (harness pause), then submit a new one."}
+
     scale_prov, signals = policy.triage_provisional(desc)
     to_phase = "DISCOVERY" if policy.needs_discovery(scale_prov) else "SLICING"
-
-    def mut(st: dict[str, Any]) -> None:
-        st["feature"] = {"id": _feature_id(desc), "desc": desc, "submitted_at": _now()}
-        st["scale_provisional"] = {
-            "by": "ai", "value": scale_prov, "at": "submit_feature", "signals": signals,
-        }
-        st["scale"] = None
-        st["scale_source"] = None
-        st["scale_measured"] = None
-        st["read_policy"] = None
-        st["risky"] = False
-        st["slices"] = []
-        st["approved"] = None
-        st["discovery_summary"] = None
-
+    fid = _feature_id(desc)
+    fs = state.new_feature_state()
+    fs["feature"] = {"id": fid, "desc": desc, "submitted_at": _now()}
+    fs["scale_provisional"] = {"by": "ai", "value": scale_prov, "at": "submit_feature", "signals": signals}
     try:
-        state.transition(s, to_phase, expect=["NO_FEATURE", "FEATURE_DONE"], mutator=mut)
+        state.transition(fs, to_phase, expect="NO_FEATURE")
     except state.TransitionDenied as e:
         return e.payload
 
-    state.write(project_root, s)
-    gatelog.append_gate_event(project_root, "submit_feature", {"phase": to_phase, "provisional_scale": scale_prov})
+    rs.setdefault("features", {})[fid] = fs
+    rs["active_feature_id"] = fid
+    state.write_root(project_root, rs)
+    gatelog.append_gate_event(project_root, "submit_feature", {"phase": to_phase, "provisional_scale": scale_prov}, feature_id=fid)
     return {
+        "feature_id": fid,
         "phase": to_phase,
         "provisional_scale": scale_prov,
         "needs_discovery": to_phase == "DISCOVERY",
@@ -99,9 +101,9 @@ def _module_resolves(project_root: str, module: str) -> bool:
 
 
 def _write_discovery(project_root: str, feature_id: str, summary: str) -> str:
-    d = Path(project_root).resolve() / state.STATE_DIRNAME
+    d = state.feature_dir(project_root, feature_id)
     d.mkdir(parents=True, exist_ok=True)
-    path = d / f"discovery-{_slug(feature_id)}.md"
+    path = d / "discovery.md"
     path.write_text(summary, encoding="utf-8")
     return str(path)
 
@@ -164,7 +166,7 @@ def propose_slices(
         return e.payload
 
     state.write(project_root, s)
-    gatelog.append_gate_event(project_root, "propose_slices", {"measured_scale": scale_meas, "mismatch": mismatch})
+    gatelog.append_gate_event(project_root, "propose_slices", {"measured_scale": scale_meas, "mismatch": mismatch}, feature_id=_fid(s))
     return {
         "phase": "AWAITING_APPROVAL",
         "provisional_scale": prov,
@@ -202,6 +204,13 @@ def get_slice_context(
         return {"error": "slice_not_startable", "slice_id": slice_id, "status": sl.get("status"),
                 "reason": "a stuck slice needs `harness unstick`; a done slice is closed."}
 
+    # Slices are sequential: finish (or get stuck on) the active slice first.
+    other = [x for x in state.active_slices(s) if x.get("id") != slice_id]
+    if other:
+        return {"error": "another_slice_active", "active_slice": other[0].get("id"),
+                "reason": f"slice {other[0].get('id')} is in progress; slices are sequential — "
+                          "finish it (run_verify) before starting another."}
+
     approved = sl.get("module")
     use_module = module or approved
     if approved and module:  # may scope equal-or-narrower, never swap/broaden
@@ -211,7 +220,11 @@ def get_slice_context(
             return {"error": "module_mismatch", "approved_module": approved, "requested": module,
                     "reason": "requested module is outside the approved slice module. Use `harness reslice`."}
 
-    ctx = context_engine.get_slice_context(project_root, use_module, depth=depth, write_manifest=True)
+    fid = _fid(s)
+    ctx = context_engine.get_slice_context(
+        project_root, use_module, depth=depth, write_manifest=True,
+        manifest_dir=state.feature_dir(project_root, fid) if fid else None,
+    )
     # Checkpoint once, on first activation; resume keeps the original rollback ref.
     if sl.get("checkpoint_ref"):
         ckpt = {"ok": True, "ref": sl["checkpoint_ref"], "resumed": True}
@@ -224,7 +237,7 @@ def get_slice_context(
         sl["checkpoint_ref"] = ckpt.get("ref", "")
     sl["status"] = "implement"
     state.write(project_root, s)
-    gatelog.append_gate_event(project_root, "get_slice_context", {"slice_id": slice_id, "module": use_module, "checkpoint": ckpt})
+    gatelog.append_gate_event(project_root, "get_slice_context", {"slice_id": slice_id, "module": use_module, "checkpoint": ckpt}, feature_id=fid)
 
     out: dict[str, Any] = dict(ctx)
     out["slice_id"] = slice_id
@@ -266,8 +279,8 @@ def expand_symbol(project_root: str, slice_id: int, name: str, source_path: str 
     if sl is None or sl.get("status") != "implement":
         return {"error": "slice_not_active", "slice_id": slice_id, "status": (sl or {}).get("status")}
     out = context_engine.expand_symbol(project_root, name, source_path=source_path, manifest_path=sl.get("manifest"))
-    edits.append_expand(project_root, slice_id, name, reason)
-    gatelog.append_gate_event(project_root, "expand_symbol", {"slice_id": slice_id, "symbol": name, "found": "error" not in out})
+    edits.append_expand(project_root, _fid(s), slice_id, name, reason)
+    gatelog.append_gate_event(project_root, "expand_symbol", {"slice_id": slice_id, "symbol": name, "found": "error" not in out}, feature_id=_fid(s))
     return out
 
 
@@ -281,6 +294,7 @@ def run_verify(project_root: str, slice_id: int, feature: str | None = None) -> 
     sl = state.find_slice(s, slice_id)
     if sl is None or sl.get("status") != "implement":
         return {"error": "slice_not_active", "slice_id": slice_id, "status": (sl or {}).get("status")}
+    fid = _fid(s)
 
     result = verify.run_verify_suite(project_root)
     automatic = result["overall"]  # pass | fail | no_checks
@@ -311,12 +325,12 @@ def run_verify(project_root: str, slice_id: int, feature: str | None = None) -> 
         if fails >= threshold:
             sl["status"] = "stuck"
             state.write(project_root, s)
-            gatelog.append_gate_event(project_root, "run_verify", {"slice_id": slice_id, "overall": "fail", "stuck": True, "fails": fails})
+            gatelog.append_gate_event(project_root, "run_verify", {"slice_id": slice_id, "overall": "fail", "stuck": True, "fails": fails}, feature_id=fid)
             return {"overall": "fail", "slice_id": slice_id, "slice_status": "stuck", "verify_fail_count": fails,
                     "guidance": f"Stop editing this slice. Diagnose, then ask the human: harness unstick {slice_id}.",
                     "result": result}
         state.write(project_root, s)
-        gatelog.append_gate_event(project_root, "run_verify", {"slice_id": slice_id, "overall": "fail", "fails": fails})
+        gatelog.append_gate_event(project_root, "run_verify", {"slice_id": slice_id, "overall": "fail", "fails": fails}, feature_id=fid)
         return {"overall": "fail", "slice_id": slice_id, "slice_status": "implement", "verify_fail_count": fails,
                 "remaining_before_stuck": threshold - fails, "result": result}
 
@@ -340,7 +354,7 @@ def run_verify(project_root: str, slice_id: int, feature: str | None = None) -> 
                 "needs": f"harness explain {slice_id}  (human, out-of-band)",
                 "explanation_depth": policy.explanation_depth(scale, risky), "result": result}
 
-    sl["authorship"] = edits.authorship(project_root, slice_id)
+    sl["authorship"] = edits.authorship(project_root, fid, slice_id)
     sl["status"] = "done"
     feature_done = state.all_done(s)
     if feature_done:
@@ -349,7 +363,7 @@ def run_verify(project_root: str, slice_id: int, feature: str | None = None) -> 
         except state.TransitionDenied:
             pass
     state.write(project_root, s)
-    gatelog.append_gate_event(project_root, "run_verify", {"slice_id": slice_id, "overall": "pass", "feature_done": feature_done})
+    gatelog.append_gate_event(project_root, "run_verify", {"slice_id": slice_id, "overall": "pass", "feature_done": feature_done}, feature_id=fid)
     remaining = [o.get("id") for o in s.get("slices", []) if o.get("status") != "done"]
     return {"overall": "pass", "slice_id": slice_id, "slice_status": "done",
             "feature_phase": s.get("phase"), "remaining_slices": remaining,
@@ -372,7 +386,7 @@ def analyze_verify_failure(
     if s.get("phase") != "IN_PROGRESS":
         return {"error": "transition_denied", "current_phase": s.get("phase"), "expected_phase": "IN_PROGRESS"}
     out = failure.analyze_verify_failure(failed_step, suspect_paths, contract_paths)
-    gatelog.append_gate_event(project_root, "analyze_verify_failure", {**out, "slice_id": slice_id})
+    gatelog.append_gate_event(project_root, "analyze_verify_failure", {**out, "slice_id": slice_id}, feature_id=_fid(s))
     return out
 
 
@@ -391,5 +405,5 @@ def track_manual_checks(
     out = manual_checks.track_manual_checks(
         project_root, feature, op=op, checks=checks, check_id=check_id, note=note, replace=replace,
     )
-    gatelog.append_gate_event(project_root, "track_manual_checks", {"op": op, "summary": out.get("summary")})
+    gatelog.append_gate_event(project_root, "track_manual_checks", {"op": op, "summary": out.get("summary")}, feature_id=_fid(state.read(project_root)))
     return out

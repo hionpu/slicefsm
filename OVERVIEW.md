@@ -55,19 +55,22 @@ The harness runs **many short sessions** (one slice, one session), so fixed per-
 
 ## The state machine
 
+A repo holds several features; **one is active** (others paused). The active feature's phase:
+
 ```
 NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL → IN_PROGRESS → FEATURE_DONE
 
-IN_PROGRESS holds N slices, each with its own status (run in parallel):
+IN_PROGRESS holds N slices, implemented one at a time (sequential):
   proposed → implement ⇄ (run_verify) → done
   implement → stuck (N fails) → (harness unstick) → implement
 ```
 
 - **DISCOVERY** runs only for Medium/Large features: a read-only scan to slice well before any edit. Micro/Small skip it.
 - **AWAITING_APPROVAL** is the human gate. Only `harness approve` (a terminal command the AI cannot run) advances it; it approves the whole slice set.
-- **IN_PROGRESS** runs slices in parallel. Each session works one slice (`get_slice_context(slice_id)`); a new session can start another slice or resume a paused one. The hook bounds edits to the union of the active slices.
-- **stuck** triggers after repeated verify failures on a slice. It bans new edits to that slice — the AI must diagnose and ask the human to `harness unstick <id>`, instead of layering bad patches.
+- **IN_PROGRESS** implements slices sequentially — one `implement` at a time, so the hook bounds edits to exactly that slice. To resume after a break, a fresh session reopens the same slice.
+- **stuck** triggers after repeated verify failures on a slice. It bans new edits — the AI must diagnose and ask the human to `harness unstick <id>`, instead of layering bad patches.
 - The feature is **FEATURE_DONE** when every slice is `done`.
+- **Multiple features:** the human can `harness pause` the active feature and `resume`/`switch` to another. Switching requires a clean git tree, so one feature's diff never leaks into another. Per-feature artifacts live under `.harness/features/<id>/`.
 
 Scale is set in three steps so no single actor owns it silently: the AI *guesses* it from the feature text, the harness *measures* it from the real slice signals at proposal time, and the human *confirms* it at approval. Scale then derives read-strictness, whether DISCOVERY runs, and how much explanation the last slice needs.
 

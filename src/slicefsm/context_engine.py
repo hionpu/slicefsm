@@ -139,8 +139,8 @@ def _excluded_modules(root: Path, touched_rel: set[str]) -> list[str]:
     return sorted(all_roots - touched_roots)
 
 
-def _write_manifest(root: Path, module: str, manifest: dict[str, Any]) -> Path:
-    d = root / STATE_DIRNAME
+def _write_manifest(root: Path, module: str, manifest: dict[str, Any], out_dir: Path | None = None) -> Path:
+    d = out_dir if out_dir is not None else root / STATE_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
     safe = module.replace("/", "-").replace("\\", "-").strip("-") or "root"
     path = d / f"slice-context-{safe}.json"
@@ -153,8 +153,12 @@ def get_slice_context(
     module: str,
     depth: int = 1,
     write_manifest: bool = True,
+    manifest_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build the 3-bucket bounded context for one slice."""
+    """Build the 3-bucket bounded context for one slice.
+
+    manifest_dir: where to write the manifest (per-feature dir); default .harness.
+    """
     root = Path(project_root).resolve()
     module_files = _resolve_module(root, module)
     module_rel = {_rel(root, f) for f in module_files}
@@ -222,7 +226,8 @@ def get_slice_context(
         "depth": depth,
         "created_at": _now(),
     }
-    manifest_path = _write_manifest(root, module, manifest) if write_manifest else None
+    _out_dir = Path(manifest_dir) if manifest_dir is not None else None
+    manifest_path = _write_manifest(root, module, manifest, out_dir=_out_dir) if write_manifest else None
 
     return {
         "module": module,

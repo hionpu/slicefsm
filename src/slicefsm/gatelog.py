@@ -17,9 +17,12 @@ GATES_FILENAME = "gates.jsonl"
 
 
 def append_gate_event(
-    project_root: str | Path, tool: str, decision: dict[str, Any]
+    project_root: str | Path, tool: str, decision: dict[str, Any], feature_id: str | None = None
 ) -> str | None:
-    """Append one gate line. Returns the path written, or None on any failure."""
+    """Append one gate line. Returns the path written, or None on any failure.
+
+    Global audit log across features; `feature_id` tags each entry.
+    """
     try:
         root = Path(project_root).resolve()
         if not root.is_dir():
@@ -29,6 +32,7 @@ def append_gate_event(
         path = log_dir / GATES_FILENAME
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "feature_id": feature_id,
             "tool": tool,
             "decision": decision,
         }

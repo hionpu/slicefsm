@@ -342,4 +342,8 @@ Install/uninstall/update: `slicefsm/{install,uninstall,update}.sh`, one-liner vi
 - the PreToolUse hook gates edits/reads against the **union** of all `implement` slices' scopes (MCP cannot see the agent's session id, so it cannot bind a session to one slice — the trade for parallelism is that any active slice's module is editable from any session);
 - `harness approve` → `IN_PROGRESS` (all slices `proposed`); `harness unstick <id>` takes a slice id; feature is `FEATURE_DONE` when all slices are `done`.
 
-The current operational spec is **SKILL.md**. Tests: 86 pass.
+**v3 — sequential slices + multiple features.** Two corrections to v2:
+- **Slices are sequential again.** v2's "several slices in parallel" was wrong: one git working tree means concurrent slice edits mix diffs, and slices usually build on each other. Now at most one slice is `implement`; `get_slice_context` refuses while another is active. This also restores strict single-slice hook gating (the union-of-one is exact).
+- **A repo holds many features; one is active.** state.json is now `{active_feature_id, features:{id: <feature-state>}}`. `state.read/write` operate on the active feature transparently (so ops/hook barely changed); `read_root/write_root` manage the set. `submit_feature` creates a feature and is refused while one is active. New CLI: `harness pause / resume <id> / switch <id> / list / cancel <id>`. **Tree policy A**: switching features is refused while the git tree is dirty (commit/stash first), so one feature's diff never leaks into another. Per-feature artifacts (manifests, edits/expands logs, explanations, discovery) live under `.harness/features/<id>/`; `gates.jsonl` stays a global audit with a `feature_id` tag. When no feature is active, read returns a `NO_ACTIVE_FEATURE` sentinel (hook allows only submit_feature/status/resume).
+
+The current operational spec is **SKILL.md**. Tests: 96 pass.

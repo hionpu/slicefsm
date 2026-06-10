@@ -5,19 +5,21 @@ description: Deterministic slice harness. A hook-enforced state machine that bou
 
 # slicefsm
 
-> Split a feature into vertical slices. The human approves the set and owns scale. Slices then run in parallel — one slice per session, inside a bounded context — and any session can start a new slice or resume a paused one.
+> Split a feature into vertical slices. The human approves the set and owns scale. Slices are implemented **one at a time, in order**, each inside a bounded context. A repo can hold **several features**; one is active. The human can pause the active feature and switch to another.
 
 On hook-capable clients (Pi, Claude Code, opencode) the current state's rules are injected each turn — follow the injected `[slicefsm]` line. This file is the fallback when hooks are off.
 
 ## State machine
 
-Feature phase:
+One **active** feature at a time (others may be paused). The active feature's phase:
 
 ```
 NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL → IN_PROGRESS → FEATURE_DONE
 ```
 
-Inside `IN_PROGRESS`, each slice has its own status and they run **in parallel**:
+When no feature is active: `NO_ACTIVE_FEATURE` (only submit_feature / resume / read).
+
+Inside `IN_PROGRESS`, slices are **sequential** — at most one is `implement`:
 
 ```
 proposed → implement ⇄ (run_verify) → done
@@ -30,7 +32,7 @@ DISCOVERY runs only for Medium/Large (read-only scan first). The feature is `FEA
 
 | When | Call |
 |---|---|
-| start a feature | `submit_feature(project_root, desc)` → guesses scale, returns repo-map |
+| start a feature | `submit_feature(project_root, desc)` → guesses scale, returns repo-map. Refused while another feature is active — the human pauses first. |
 | after discovery/slicing | `propose_slices(project_root, slices, discovery_summary?)` |
 | IN_PROGRESS: pick work | `list_slices(project_root)` → statuses; then start/resume one |
 | start/resume a slice | `get_slice_context(project_root, slice_id, module?)` — first action in a session |
@@ -43,7 +45,7 @@ Each slice in `propose_slices` needs: `title` (a user-visible behavior, not a la
 ## Rules
 
 - **Human owns approval and scale.** After `propose_slices`, stop. The human runs `harness approve [--scale S] [--risky]` out-of-band. You cannot self-approve.
-- **One slice per session.** In a session, call `get_slice_context(slice_id)` first and work that slice. To work another slice or resume a paused one, open a fresh session and pick it via `list_slices`.
+- **One slice at a time, in order.** Call `get_slice_context(slice_id)` first and work that slice. You cannot start another slice until the current one passes verify (or gets stuck). To resume after a break, open a fresh session and call `get_slice_context` on the same slice.
 - **Bounded reads.** For a dependency body, call `expand_symbol` — do not read the whole file. Strict mode (Micro/Small/risky) denies out-of-slice reads.
 - **Edits stay in active slices**, every scale (new files inside the slice dir are fine). Out-of-scope change needs human approval.
 - **Verify before done.** `run_verify(slice_id)` must pass. On Medium+/risky the slice that finishes the feature also needs `harness explain <id>`.
@@ -51,6 +53,8 @@ Each slice in `propose_slices` needs: `title` (a user-visible behavior, not a la
 
 ## Human commands (out-of-band, terminal only)
 
-`harness approve` · `harness explain <id>` · `harness unstick <id>` · `harness reslice` · `harness status` (read-only).
+Per-feature: `harness approve` · `harness explain <id>` · `harness unstick <id>` · `harness reslice`.
+
+Across features: `harness pause` · `harness resume <feature_id>` · `harness switch <feature_id>` · `harness cancel <feature_id>` · `harness list` / `harness status` (read-only). Switching features requires a clean git tree (commit or stash first).
 
 See `references/` for slicing guidance and the context-scoping model.

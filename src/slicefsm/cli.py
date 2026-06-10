@@ -18,11 +18,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import gatelog, policy, state
+from . import gatelog, git_util, policy, state
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _tree_blocks(project_root: str) -> dict[str, Any] | None:
+    """Tree policy A: refuse a feature switch while the git tree is dirty."""
+    if git_util.is_git_repo(project_root) and git_util.is_dirty(project_root):
+        return {"ok": False, "reason": "dirty_tree",
+                "guidance": "Commit or `git stash` your changes before switching features "
+                            "(prevents one feature's diff leaking into another)."}
+    return None
 
 
 # ── interactive confirmation (fails closed without a tty) ──────────
@@ -114,12 +123,14 @@ def cmd_explain(
     if not content.strip():
         return {"ok": False, "reason": "empty_explanation"}
 
-    path = Path(project_root).resolve() / state.STATE_DIRNAME / f"explain-slice-{slice_id}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    fid = (s.get("feature") or {}).get("id") or "feature"
+    d = state.feature_dir(project_root, fid)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"explain-slice-{slice_id}.md"
     path.write_text(content, encoding="utf-8")
     target["explanation"] = str(path)
     state.write(project_root, s)
-    gatelog.append_gate_event(project_root, "harness_explain", {"slice_id": slice_id})
+    gatelog.append_gate_event(project_root, "harness_explain", {"slice_id": slice_id}, feature_id=fid)
     return {"ok": True, "path": str(path)}
 
 
@@ -172,11 +183,12 @@ def cmd_reslice(
 
 def cmd_status(project_root: str) -> dict[str, Any]:
     s = state.read(project_root)
+    rs = state.read_root(project_root)
     return {
+        "active_feature": rs.get("active_feature_id"),
         "phase": s.get("phase"),
         "feature": (s.get("feature") or {}).get("desc"),
         "scale": s.get("scale"),
-        "scale_source": s.get("scale_source"),
         "risky": s.get("risky"),
         "read_policy": s.get("read_policy"),
         "active_slices": [x.get("id") for x in state.active_slices(s)],
@@ -186,7 +198,86 @@ def cmd_status(project_root: str) -> dict[str, Any]:
              "authorship": x.get("authorship")}
             for x in s.get("slices", [])
         ],
+        "features": _feature_rows(rs),
     }
+
+
+# ── multi-feature management (root level) ──────────────────────────
+
+
+def _feature_rows(rs: dict[str, Any]) -> list[dict[str, Any]]:
+    active = rs.get("active_feature_id")
+    rows = []
+    for fid, fs in rs.get("features", {}).items():
+        slices = fs.get("slices", [])
+        done = sum(1 for x in slices if x.get("status") == "done")
+        rows.append({
+            "id": fid,
+            "active": fid == active,
+            "paused": bool(fs.get("paused")),
+            "phase": fs.get("phase"),
+            "desc": (fs.get("feature") or {}).get("desc"),
+            "slices": f"{done}/{len(slices)}" if slices else "0/0",
+        })
+    return rows
+
+
+def cmd_list(project_root: str) -> dict[str, Any]:
+    return {"features": _feature_rows(state.read_root(project_root))}
+
+
+def cmd_pause(project_root: str, confirm: Callable[[str], bool] = _tty_confirm) -> dict[str, Any]:
+    rs = state.read_root(project_root)
+    fid = rs.get("active_feature_id")
+    if not fid:
+        return {"ok": False, "reason": "no_active_feature"}
+    blocked = _tree_blocks(project_root)
+    if blocked:
+        return blocked
+    if not confirm(f"Pause feature {fid}? [y/N] "):
+        return {"ok": False, "reason": "not_confirmed"}
+    rs["features"][fid]["paused"] = True
+    rs["active_feature_id"] = None
+    state.write_root(project_root, rs)
+    gatelog.append_gate_event(project_root, "harness_pause", {}, feature_id=fid)
+    return {"ok": True, "paused": fid}
+
+
+def cmd_switch(project_root: str, feature_id: str, confirm: Callable[[str], bool] = _tty_confirm) -> dict[str, Any]:
+    """Make feature_id active (resume). Pauses the current one (clean tree only)."""
+    rs = state.read_root(project_root)
+    if feature_id not in rs.get("features", {}):
+        return {"ok": False, "reason": "feature_not_found", "feature_id": feature_id}
+    cur = rs.get("active_feature_id")
+    if cur == feature_id:
+        return {"ok": True, "active_feature": feature_id, "note": "already active"}
+    if cur is not None:
+        blocked = _tree_blocks(project_root)
+        if blocked:
+            return blocked
+    if not confirm(f"Switch active feature to {feature_id}? [y/N] "):
+        return {"ok": False, "reason": "not_confirmed"}
+    if cur is not None:
+        rs["features"][cur]["paused"] = True
+    rs["features"][feature_id]["paused"] = False
+    rs["active_feature_id"] = feature_id
+    state.write_root(project_root, rs)
+    gatelog.append_gate_event(project_root, "harness_switch", {"from": cur}, feature_id=feature_id)
+    return {"ok": True, "active_feature": feature_id, "phase": rs["features"][feature_id].get("phase")}
+
+
+def cmd_cancel(project_root: str, feature_id: str, confirm: Callable[[str], bool] = _tty_confirm) -> dict[str, Any]:
+    rs = state.read_root(project_root)
+    if feature_id not in rs.get("features", {}):
+        return {"ok": False, "reason": "feature_not_found", "feature_id": feature_id}
+    if not confirm(f"Cancel and discard feature {feature_id}? [y/N] "):
+        return {"ok": False, "reason": "not_confirmed"}
+    rs["features"].pop(feature_id, None)
+    if rs.get("active_feature_id") == feature_id:
+        rs["active_feature_id"] = None
+    state.write_root(project_root, rs)
+    gatelog.append_gate_event(project_root, "harness_cancel", {}, feature_id=feature_id)
+    return {"ok": True, "cancelled": feature_id}
 
 
 # ── argparse entry point ───────────────────────────────────────────
@@ -214,7 +305,17 @@ def build_parser() -> argparse.ArgumentParser:
     sr = sub.add_parser("reslice", help="discard slices and re-slice the feature")
     sr.add_argument("--note")
 
-    sub.add_parser("status", help="print current phase and slices (read-only)")
+    sub.add_parser("status", help="print current feature/slices + all features (read-only)")
+    sub.add_parser("list", help="list all features (read-only)")
+    sub.add_parser("pause", help="pause the active feature (clears active; clean tree required)")
+
+    swp = sub.add_parser("resume", help="make a feature active (alias: switch)")
+    swp.add_argument("feature_id")
+    swp2 = sub.add_parser("switch", help="switch active feature")
+    swp2.add_argument("feature_id")
+
+    scp = sub.add_parser("cancel", help="discard a feature")
+    scp.add_argument("feature_id")
     return p
 
 
@@ -231,6 +332,14 @@ def main(argv: list[str] | None = None) -> int:
         result = cmd_reslice(root, note=args.note)
     elif args.command == "status":
         result = cmd_status(root)
+    elif args.command == "list":
+        result = cmd_list(root)
+    elif args.command == "pause":
+        result = cmd_pause(root)
+    elif args.command in ("resume", "switch"):
+        result = cmd_switch(root, args.feature_id)
+    elif args.command == "cancel":
+        result = cmd_cancel(root, args.feature_id)
     else:  # pragma: no cover
         return 2
     sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
