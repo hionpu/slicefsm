@@ -199,36 +199,44 @@ def _slice_for_path(s: dict[str, Any], rel: str | None) -> Any:
 
 
 def build_state_prompt(s: dict[str, Any]) -> str:
-    phase = s.get("phase", "NO_FEATURE")
-    read_mode = (s.get("read_policy") or {}).get("mode", "strict")
+    """Minimal per-turn injection: facts + the valid next tool call(s).
+
+    Workflow *rules* are not repeated here — they live in the tool descriptions
+    (loaded once) and in PreToolUse deny reasons (delivered only on a misstep).
+    Determinism comes from the hook, not this hint, so it can stay tiny.
+    """
+    phase = s.get("phase", "NO_ACTIVE_FEATURE")
+    fid = (s.get("feature") or {}).get("id", "") or "feature"
+    read = (s.get("read_policy") or {}).get("mode", "strict")
 
     if phase == "IN_PROGRESS":
-        rows = [
-            f'  #{x.get("id")} [{x.get("status")}] "{x.get("title","")}" ({x.get("module","?")})'
-            for x in s.get("slices", [])
-        ]
-        active = [x.get("id") for x in state.active_slices(s)]
-        text = (
-            "IN_PROGRESS. Slices are implemented one at a time, in order:\n"
-            + "\n".join(rows)
-            + f"\nActive (editable now): {active or 'none'}. "
-            "Call get_slice_context(slice_id) to start the next 'proposed' slice or resume the 'implement' one "
-            "(you cannot start another while one is active). "
-            "Edit only within the active slice; new files inside its dir are fine. "
-            "Pass slice_id to expand_symbol / run_verify. A stuck slice needs `harness unstick <id>`. "
-            f"Read mode: {read_mode}."
-        )
-        return f"[slicefsm] {text}"
+        slices = s.get("slices", [])
+        n = len(slices)
+        cur = next((x for x in slices if x.get("status") == "implement"), None)
+        stuck = next((x for x in slices if x.get("status") == "stuck"), None)
+        nxt = next((x for x in slices if x.get("status") == "proposed"), None)
+        if cur is not None:
+            i = cur.get("id")
+            aff = (f'{fid} - slice {i}/{n} "{cur.get("title","")}" implement '
+                   f'({cur.get("module","?")}, {read}) - next: run_verify({i}) | expand_symbol({i},...)')
+        elif stuck is not None:
+            sid = stuck.get("id")
+            aff = f'{fid} - slice {sid} STUCK - diagnose, then human: harness unstick {sid}'
+        elif nxt is not None:
+            aff = f'{fid} IN_PROGRESS - next: get_slice_context({nxt.get("id")})'
+        else:
+            aff = f'{fid} - all slices done'
+        return f"[slicefsm] {aff}"
 
-    base = {
-        "NO_ACTIVE_FEATURE": "No active feature. Call submit_feature(desc) to start one, or the human runs `harness resume <id>` / `harness list`. No edits.",
-        "NO_FEATURE": "No active feature. To start, call submit_feature(desc). No edits until a feature is sliced and approved.",
-        "DISCOVERY": "DISCOVERY (read-only). Scan the code to understand structure. No edits. When ready, call propose_slices(slices, discovery_summary=...).",
-        "SLICING": "SLICING. Split the feature into vertical, user-visible slices. No edits. Call propose_slices(slices).",
-        "AWAITING_APPROVAL": "AWAITING_APPROVAL. Slices are proposed. Only the human can approve (out-of-band: harness approve). Do not start implementing.",
-        "FEATURE_DONE": "FEATURE_DONE. The feature is closed. Start a new one with submit_feature.",
-    }.get(phase, "Unknown phase.")
-    return f"[slicefsm] {base}"
+    aff = {
+        "NO_ACTIVE_FEATURE": "no active feature - next: submit_feature(desc); or human: harness resume <id> / list",
+        "NO_FEATURE": f"{fid} - next: propose_slices(slices)",
+        "DISCOVERY": f"{fid} DISCOVERY (read-only) - next: propose_slices(slices, discovery_summary=...)",
+        "SLICING": f"{fid} SLICING - next: propose_slices(slices)",
+        "AWAITING_APPROVAL": f"{fid} AWAITING_APPROVAL - waiting for human: harness approve",
+        "FEATURE_DONE": f"{fid} done - next: submit_feature(desc); or human: harness switch <id>",
+    }.get(phase, phase)
+    return f"[slicefsm] {aff}"
 
 
 def _emit(obj: dict[str, Any]) -> None:
@@ -297,6 +305,14 @@ _HANDLERS = {
 
 
 def main() -> None:
+    # The agent reads our stdout as UTF-8 JSON. Force it, so a non-UTF-8 console
+    # locale (e.g. Windows cp949) cannot mangle a deny reason with a non-ASCII path.
+    for stream in (sys.stdout, sys.stdin):
+        try:
+            stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     event_name = (sys.argv[1] if len(sys.argv) > 1 else "").strip().lower()
     try:
         raw = sys.stdin.read()

@@ -283,7 +283,7 @@ The harness runs many short sessions. Fixed per-session load is paid every time,
 The three costs behave differently:
 - **MCP tool defs** load once at connect, for *all* tools, no matter the state. MCP has no per-state tool gating, so we cannot shrink this by state. Levers: keep the tool count small (8), keep each docstring ≤3 lines, push detail into runtime output, not the schema. Target ~1,200 tok (measured ~1,350 with 8 tools).
 - **Skill body** can be near-zero. The FSM injects the current state's rules each turn, so no big always-loaded workflow file is needed. The skill is a ~150-tok stub: "this project uses slicefsm; follow the injected state prompt." Or nothing at all.
-- **Per-state injection** is small but per-turn, so it adds up over a session. Keep each state prompt ≤250 tok.
+- **Per-turn injection** is "affordance only": facts (active feature, current slice, status, read mode) + the valid next tool call — not the rules. Rules live in tool descriptions (loaded once) + PreToolUse deny reasons (only on a misstep). Measured: IN_PROGRESS ~35 tok/turn (was ~120 when it restated the rules), other phases ~16–26 tok. The hint is advisory; the hook is what binds. Kept ASCII-only so a non-UTF-8 console can't mangle the emitted JSON.
 
 This is the same mechanism as determinism: the hook serves only the current state's prompt. That makes the workflow deterministic *and* cuts the skill to near-zero. One lever, both wins.
 

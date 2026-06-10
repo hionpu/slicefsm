@@ -117,19 +117,34 @@ def test_unknown_tool_allowed():
 # ── build_state_prompt ─────────────────────────────────────────────
 
 
-def test_state_prompt_in_progress_lists_slices():
-    s = state.new_state()
+def test_state_prompt_affordance_for_active_slice():
+    s = state.new_feature_state()
     s["phase"] = "IN_PROGRESS"
+    s["feature"] = {"id": "feat-a"}
     s["slices"] = [
         {"id": 1, "title": "open UI", "module": "src/ui", "status": "implement"},
         {"id": 2, "title": "save", "module": "src/store", "status": "proposed"},
     ]
     s["read_policy"] = {"mode": "relaxed"}
     prompt = hook.build_state_prompt(s)
-    assert "IN_PROGRESS" in prompt
-    assert "open UI" in prompt and "#2" in prompt
-    assert "Active (editable now): [1]" in prompt
+    # facts + the valid next tool call, no rules paragraph
+    assert "open UI" in prompt
+    assert "run_verify(1)" in prompt and "expand_symbol(1" in prompt
     assert "relaxed" in prompt
+    assert "Edit only" not in prompt  # rules are not re-injected
+    assert len(prompt) < 160  # stays tiny
+
+
+def test_state_prompt_affordance_next_slice():
+    s = state.new_feature_state()
+    s["phase"] = "IN_PROGRESS"
+    s["feature"] = {"id": "feat-a"}
+    s["slices"] = [{"id": 1, "title": "x", "module": "src", "status": "proposed"}]
+    assert "get_slice_context(1)" in hook.build_state_prompt(s)
+
+
+def test_state_prompt_affordance_no_active_feature():
+    assert "submit_feature" in hook.build_state_prompt(state.new_feature_state() | {"phase": "NO_ACTIVE_FEATURE"})
 
 
 # ── dispatch handlers ──────────────────────────────────────────────
