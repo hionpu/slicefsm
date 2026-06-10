@@ -1,4 +1,4 @@
-"""FastMCP server: 7 tools, thin wrappers over ops.py.
+"""FastMCP server: 8 tools, thin wrappers over ops.py.
 
 Docstrings are kept short on purpose. Tool definitions load every session
 (see DESIGN section 10 token budget), so detail goes into the runtime result,

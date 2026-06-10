@@ -176,3 +176,10 @@ def test_list_and_cancel(tmp_path):
 
 def test_switch_unknown_feature(tmp_path):
     assert cli.cmd_switch(str(tmp_path), "nope", confirm=YES)["reason"] == "feature_not_found"
+
+
+def test_pause_warns_outside_git(tmp_path):
+    ops.submit_feature(str(tmp_path), "first")  # tmp_path is not a git repo
+    out = cli.cmd_pause(str(tmp_path), confirm=YES)
+    assert out["ok"] is True
+    assert "git" in out.get("warning", "")

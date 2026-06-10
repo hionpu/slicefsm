@@ -259,7 +259,7 @@ A small console script (shipped with the MCP server package). Run by the human i
 
 1. **State core**: `.harness/state.json` schema + a `state.py` (read/validate/transition/append-gate, scale lifecycle, read_policy derivation, fail-count/STUCK logic). Pure, unit-testable.
 2. **Context engine (map + slice + expand)**: tree-sitter-based backend so it is language-agnostic from day one (Python `ast` as the first concrete backend behind the same interface). Produces repo-map, 3-bucket slice context, single-symbol expand. Preserve `range` on dep records (for `expand_symbol`).
-3. **MCP tools**: register the seven tools, each wired to `state.py` transitions.
+3. **MCP tools**: register the tools (8, incl. `list_slices`), each wired to `state.py` transitions.
 4. **`harness-hook` dispatcher** + the four hook outputs; the scale-tiered PreToolUse read/edit gate; checkpoint write on scope→implement.
 5. **`harness` CLI**: approve / explain / unstick / status / reslice, interactive + tty-gated.
 6. **Dogfood**: run the harness on its own next feature.
@@ -281,7 +281,7 @@ The harness runs many short sessions. Fixed per-session load is paid every time,
 | `get_slice_context` output | bounded work payload | same (already bounded) |
 
 The three costs behave differently:
-- **MCP tool defs** load once at connect, for *all* tools, no matter the state. MCP has no per-state tool gating, so we cannot shrink this by state. Levers: keep 7 tools, keep each docstring ≤3 lines, push detail into runtime output, not the schema. Target ~1,200 tok.
+- **MCP tool defs** load once at connect, for *all* tools, no matter the state. MCP has no per-state tool gating, so we cannot shrink this by state. Levers: keep the tool count small (8), keep each docstring ≤3 lines, push detail into runtime output, not the schema. Target ~1,200 tok (measured ~1,350 with 8 tools).
 - **Skill body** can be near-zero. The FSM injects the current state's rules each turn, so no big always-loaded workflow file is needed. The skill is a ~150-tok stub: "this project uses slicefsm; follow the injected state prompt." Or nothing at all.
 - **Per-state injection** is small but per-turn, so it adds up over a session. Keep each state prompt ≤250 tok.
 
@@ -320,7 +320,7 @@ Package: `slicefsm/` (Python; deps: `mcp` + tree-sitter grammars, prebuilt wheel
 |---|---|---|
 | 1 State core | `state.py` (FSM + atomic IO), `policy.py` (scale/read_policy/thresholds), `gatelog.py` | done |
 | 2 Context engine | `context_engine.py` + `backends/` (interface, Python `ast`, tree-sitter C#/C++). Resolution is index-based via `provides_keys`/`import_keys`: Python module path, C# namespace, C++ `#include`. | done |
-| 3 MCP tools | `ops.py` (logic) + `server.py` (7 thin tools), helpers `verify.py` / `failure.py` / `manual_checks.py` / `git_util.py` / `edits.py` | done |
+| 3 MCP tools | `ops.py` (logic) + `server.py` (8 thin tools incl. `list_slices`), helpers `verify.py` / `failure.py` / `manual_checks.py` / `git_util.py` / `edits.py` | done |
 | 4 Hook dispatcher | `hook.py` — `python -m slicefsm.hook <event>`, pure `decide()` + IO | done |
 | 5 Human CLI | `cli.py` — `harness` (approve/explain/unstick/reslice/status), tty-gated | done |
 | 6 Dogfood | run on its own next feature | pending (next) |

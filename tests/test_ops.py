@@ -157,6 +157,24 @@ def test_submit_while_active_denied(project):
     assert out["error"] == "active_feature_exists"
 
 
+def test_submit_after_feature_done(project, monkeypatch):
+    _pass(monkeypatch)
+    ops.submit_feature(str(project), "tiny")
+    ops.propose_slices(str(project), [
+        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
+    ])
+    _approve(project, "Micro")
+    ops.get_slice_context(str(project), 1)
+    ops.run_verify(str(project), 1)
+    assert state.read(project)["phase"] == "FEATURE_DONE"
+    # a finished feature is archived; a new one may start
+    out = ops.submit_feature(str(project), "second feature")
+    assert "error" not in out and "feature_id" in out
+    rs = state.read_root(project)
+    assert len(rs["features"]) == 2  # old one kept as a record
+    assert rs["active_feature_id"] == out["feature_id"]
+
+
 def test_resume_paused_slice(project, monkeypatch):
     _pass(monkeypatch)
     _three(project)

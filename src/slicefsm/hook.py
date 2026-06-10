@@ -114,7 +114,9 @@ def decide(
         cmd = str((tool_input or {}).get("command", "")).strip().lower()
         is_cli = any(m in cmd for m in _CLI_MARKERS)
         if is_cli and any(v in cmd for v in _HUMAN_ONLY_VERBS):
-            return False, "approve / explain / unstick / reslice are human-only, out-of-band commands. Run them yourself in the terminal; the AI cannot."
+            return False, ("harness state changes (approve / explain / unstick / reslice / pause / resume / "
+                           "switch / cancel) are human-only, out-of-band commands. Ask the human to run it in "
+                           "the terminal; the AI cannot. (harness status / list are fine.)")
 
     # 2. MCP tools gated by phase.
     op = _mcp_op(t)
@@ -207,11 +209,12 @@ def build_state_prompt(s: dict[str, Any]) -> str:
         ]
         active = [x.get("id") for x in state.active_slices(s)]
         text = (
-            "IN_PROGRESS. Slices (work them in parallel across sessions):\n"
+            "IN_PROGRESS. Slices are implemented one at a time, in order:\n"
             + "\n".join(rows)
             + f"\nActive (editable now): {active or 'none'}. "
-            "Call get_slice_context(slice_id) to start a 'proposed' slice or resume an 'implement' one. "
-            "Edit only within active slices; new files inside their dirs are fine. "
+            "Call get_slice_context(slice_id) to start the next 'proposed' slice or resume the 'implement' one "
+            "(you cannot start another while one is active). "
+            "Edit only within the active slice; new files inside its dir are fine. "
             "Pass slice_id to expand_symbol / run_verify. A stuck slice needs `harness unstick <id>`. "
             f"Read mode: {read_mode}."
         )

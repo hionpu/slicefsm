@@ -9,7 +9,7 @@
 slicefsm adds three things to your project:
 
 1. **A skill stub** (`.claude/skills/slicefsm/SKILL.md`) — one compact screen. It is a fallback, not the main driver. On hook-capable clients the real instructions are injected per turn (see below).
-2. **An MCP server** (7 tools) — the AI calls these to move through the workflow: submit a feature, propose slices, load a slice's bounded context, expand one symbol, run verify, classify a failure, track manual checks.
+2. **An MCP server** (8 tools) — the AI calls these to move through the workflow: submit a feature, propose slices, list slices, load a slice's bounded context, expand one symbol, run verify, classify a failure, track manual checks.
 3. **Four hooks** — a state machine the agent runtime enforces. The hooks gate which tools run in each state and inject only the current state's prompt.
 
 You install with one curl line. A human approves slices and owns scale, out-of-band in the terminal. State lives in `.harness/state.json` under your project root.
@@ -91,17 +91,18 @@ One dispatcher, `python -m slicefsm.hook <event>`, reads the current state and a
 
 The PreToolUse matrix is scale-aware. **Edits are strict at every scale** — outside the slice's module, denied. **Reads are tiered**: strict (Micro/Small/risky) denies out-of-module reads and forces `expand_symbol`; relaxed (Medium/Large) allows logged reads but keeps edits strict. Edit-safety and token-cost are separate dials.
 
-### The MCP server (7 tools)
+### The MCP server (8 tools)
 
-| Tool | Phase | What it does |
+| Tool | When | What it does |
 |---|---|---|
-| `submit_feature` | NO_FEATURE | record the feature, guess scale, return a repo-map (names only, no bodies) |
+| `submit_feature` | no active feature | record the feature, guess scale, return a repo-map; refused while another is active (a finished feature is archived first) |
 | `propose_slices` | DISCOVERY / SLICING | validate slices, measure scale, flag layer-noun titles, stage for human approval |
-| `get_slice_context` | SLICE_SCOPING | serve own-module full text + dependency signatures + sibling names; write a git rollback checkpoint |
-| `expand_symbol` | SLICE_IMPLEMENT | reveal one dependency body via its stored line range (logged) |
-| `run_verify` | IMPLEMENT / VERIFY | run the suite; on pass advance or finish; on repeated fail go STUCK |
-| `analyze_verify_failure` | VERIFY / STUCK | classify contract-sensitive vs routine; block a blind patch on the former |
-| `track_manual_checks` | implement+ | per-feature manual-check ledger; blocks "done" while required items pend |
+| `list_slices` | IN_PROGRESS | all slices + status, to pick one to start or resume |
+| `get_slice_context` | IN_PROGRESS | start/resume a slice: own-module full text + dependency signatures + sibling names; write a git rollback checkpoint |
+| `expand_symbol` | IN_PROGRESS | reveal one dependency body via its stored line range (logged) |
+| `run_verify` | IN_PROGRESS | run the suite; on pass mark the slice done (finish the feature if it was the last); on repeated fail mark it stuck |
+| `analyze_verify_failure` | IN_PROGRESS | classify contract-sensitive vs routine; block a blind patch on the former |
+| `track_manual_checks` | IN_PROGRESS | per-feature manual-check ledger; blocks "done" while required items pend |
 
 Every transition appends one line to `.harness/gates.jsonl`.
 

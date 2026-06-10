@@ -57,11 +57,20 @@ def _fid(s: dict[str, Any]) -> str | None:
 
 
 def submit_feature(project_root: str, desc: str) -> dict[str, Any]:
-    """Create a new feature and make it active. Refused while one is active."""
+    """Create a new feature and make it active.
+
+    Refused while another feature is mid-flight. A FEATURE_DONE feature is
+    archived (kept in `features`, released from active) so a new one can start.
+    """
     rs = state.read_root(project_root)
-    if rs.get("active_feature_id"):
-        return {"error": "active_feature_exists", "active_feature": rs["active_feature_id"],
-                "reason": "Pause the current feature first (harness pause), then submit a new one."}
+    active_id = rs.get("active_feature_id")
+    if active_id:
+        active_fs = rs.get("features", {}).get(active_id, {})
+        if active_fs.get("phase") != "FEATURE_DONE":
+            return {"error": "active_feature_exists", "active_feature": active_id,
+                    "reason": "Pause the current feature first (harness pause), then submit a new one."}
+        # Archive the finished feature: keep the record, release the active slot.
+        rs["active_feature_id"] = None
 
     scale_prov, signals = policy.triage_provisional(desc)
     to_phase = "DISCOVERY" if policy.needs_discovery(scale_prov) else "SLICING"

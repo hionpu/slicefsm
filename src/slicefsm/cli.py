@@ -34,6 +34,14 @@ def _tree_blocks(project_root: str) -> dict[str, Any] | None:
     return None
 
 
+def _non_git_warning(project_root: str) -> str | None:
+    """Tree policy A only works under git. Warn (don't block) outside git."""
+    if not git_util.is_git_repo(project_root):
+        return ("not a git repo — slicefsm cannot detect a dirty tree, so switching features cannot "
+                "prevent diff-mixing. Commit work yourself, or track this project with git for safe switching.")
+    return None
+
+
 # ── interactive confirmation (fails closed without a tty) ──────────
 
 
@@ -240,7 +248,10 @@ def cmd_pause(project_root: str, confirm: Callable[[str], bool] = _tty_confirm) 
     rs["active_feature_id"] = None
     state.write_root(project_root, rs)
     gatelog.append_gate_event(project_root, "harness_pause", {}, feature_id=fid)
-    return {"ok": True, "paused": fid}
+    out = {"ok": True, "paused": fid}
+    if (w := _non_git_warning(project_root)):
+        out["warning"] = w
+    return out
 
 
 def cmd_switch(project_root: str, feature_id: str, confirm: Callable[[str], bool] = _tty_confirm) -> dict[str, Any]:
@@ -263,7 +274,10 @@ def cmd_switch(project_root: str, feature_id: str, confirm: Callable[[str], bool
     rs["active_feature_id"] = feature_id
     state.write_root(project_root, rs)
     gatelog.append_gate_event(project_root, "harness_switch", {"from": cur}, feature_id=feature_id)
-    return {"ok": True, "active_feature": feature_id, "phase": rs["features"][feature_id].get("phase")}
+    out = {"ok": True, "active_feature": feature_id, "phase": rs["features"][feature_id].get("phase")}
+    if (w := _non_git_warning(project_root)):
+        out["warning"] = w
+    return out
 
 
 def cmd_cancel(project_root: str, feature_id: str, confirm: Callable[[str], bool] = _tty_confirm) -> dict[str, Any]:
