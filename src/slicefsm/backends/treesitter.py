@@ -127,7 +127,20 @@ class CSharpBackend(_TSBackend):
         return out
 
     def parse_imports(self, source: str) -> list[ImportRef]:
+        """`using` namespaces PLUS referenced PascalCase identifiers.
+
+        The PascalCase identifiers are candidate type references. They only
+        resolve if the repo declares a type with that name (the index filters
+        out external types and method/local names), so this covers code that
+        uses no namespaces at all — common in Unity.
+        """
         refs: list[ImportRef] = []
+        seen: set[str] = set()
+
+        def add(mod: str) -> None:
+            if mod and mod not in seen:
+                seen.add(mod)
+                refs.append(ImportRef(module=mod, level=0))
 
         def walk(node):
             for ch in node.named_children:
@@ -136,19 +149,33 @@ class CSharpBackend(_TSBackend):
                     if "=" in ns:  # alias: using Foo = A.B.C;
                         ns = ns.split("=")[-1].strip()
                     if ns and ns[0].isalpha():
-                        refs.append(ImportRef(module=ns, level=0))
-                else:
-                    walk(ch)
+                        add(ns)
+                    continue
+                if ch.type == "identifier":
+                    t = _text(ch)
+                    if t[:1].isupper():
+                        add(t)
+                walk(ch)
 
         walk(self._root(source))
         return refs
 
     def provides_keys(self, source: str, rel_path: str) -> list[str]:
+        """Namespaces declared in the file AND the names of types it declares.
+
+        The type names let dependency resolution work without `using` — a file
+        that declares `class Inventory` is the resolver target for any module
+        that mentions `Inventory`.
+        """
         keys: list[str] = []
 
         def walk(node):
             for ch in node.named_children:
                 if ch.type in ("namespace_declaration", "file_scoped_namespace_declaration"):
+                    nm = ch.child_by_field_name("name")
+                    if nm is not None:
+                        keys.append(_text(nm))
+                elif ch.type in self._TYPES:
                     nm = ch.child_by_field_name("name")
                     if nm is not None:
                         keys.append(_text(nm))

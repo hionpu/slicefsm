@@ -94,6 +94,25 @@ def test_csharp_repo_map(csharp_project):
     assert "Store" in rmap["packages"]["src/Core/Store.cs"]
 
 
+def test_csharp_global_namespace_resolution(tmp_path):
+    # Unity style: no namespaces, no project usings. Resolution must still work
+    # via type-name references.
+    (tmp_path / "src" / "Player").mkdir(parents=True)
+    (tmp_path / "src" / "Items").mkdir(parents=True)
+    (tmp_path / "src" / "Player" / "Player.cs").write_text(
+        "public class Player {\n  public void Pickup() { Inventory inv = new Inventory(); inv.Add(1); }\n}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "Items" / "Inventory.cs").write_text(
+        "public class Inventory {\n  public void Add(int id) { }\n}\n",
+        encoding="utf-8",
+    )
+    ctx = ce.get_slice_context(tmp_path, "src/Player")
+    dep_names = {d["name"] for d in ctx["dependencies"]}
+    assert "Inventory" in dep_names  # resolved by type-name, no using/namespace
+    assert "Inventory.Add" in dep_names
+
+
 # ── C++ ────────────────────────────────────────────────────────────
 
 
