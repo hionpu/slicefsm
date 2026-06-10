@@ -50,3 +50,13 @@ class LanguageBackend(Protocol):
     def parse_imports(self, source: str) -> list[ImportRef]:
         """Import refs in a file (for dependency resolution)."""
         ...
+
+    def provides_keys(self, source: str, rel_path: str) -> list[str]:
+        """Resolution keys this file provides (e.g. its module / namespace /
+        header path). The engine builds a key -> files index from these."""
+        ...
+
+    def import_keys(self, ref: ImportRef, from_rel: str) -> list[str]:
+        """Resolution keys an import wants. The engine looks these up in the
+        index to find the dependency files. Language-uniform string matching."""
+        ...

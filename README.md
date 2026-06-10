@@ -49,7 +49,7 @@ NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL
 |---|---|
 | `state.py` | the FSM + atomic state IO (`.harness/state.json`) |
 | `policy.py` | scale triage, read-policy derivation, thresholds |
-| `context_engine.py` + `backends/` | repo-map, 3-bucket slice context, expand |
+| `context_engine.py` + `backends/` | repo-map, 3-bucket slice context, expand (Python, C#, C++ via tree-sitter) |
 | `ops.py` / `server.py` | the 7 MCP tools |
 | `hook.py` | the `slicefsm-hook` dispatcher (4 events) |
 | `cli.py` | the human-only `harness` CLI |

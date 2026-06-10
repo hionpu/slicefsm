@@ -85,39 +85,40 @@ def build_repo_map(project_root: str | Path) -> dict[str, Any]:
     return {"packages": packages, "created_at": _now()}
 
 
-# ── import resolution ──────────────────────────────────────────────
+# ── import resolution (index-based, language-uniform) ──────────────
 
 
-def _candidate_paths(root: Path, dotted: str) -> list[Path]:
-    if not dotted:
-        return []
-    rel = Path(*dotted.split("."))
-    bases = [root] + [root / pre for pre in _SRC_PREFIXES if (root / pre).is_dir()]
-    cands: list[Path] = []
-    for base in bases:
-        cands.append(base / f"{rel}.py")
-        cands.append(base / rel / "__init__.py")
-    return cands
+def _provides(backend, source: str, rel: str) -> list[str]:
+    fn = getattr(backend, "provides_keys", None)
+    return fn(source, rel) if fn else []
 
 
-def _resolve_import(root: Path, from_file: Path, ref) -> Path | None:
-    """Resolve an ImportRef to an in-project file, or None if external."""
-    if ref.level and ref.level > 0:
-        base = from_file.parent
-        for _ in range(ref.level - 1):
-            base = base.parent
-        if ref.module:
-            rel = Path(*ref.module.split("."))
-            for cand in (base / f"{rel}.py", base / rel / "__init__.py"):
-                if cand.is_file():
-                    return cand
-            return None
-        cand = base / "__init__.py"
-        return cand if cand.is_file() else None
-    for cand in _candidate_paths(root, ref.module):
-        if cand.is_file():
-            return cand
-    return None
+def _import_keys(backend, ref, from_rel: str) -> list[str]:
+    fn = getattr(backend, "import_keys", None)
+    if fn:
+        return fn(ref, from_rel)
+    return [ref.module] if getattr(ref, "module", None) else []
+
+
+def _build_resolution_index(root: Path) -> dict[str, set[str]]:
+    """Map each provides-key to the rel files that provide it.
+
+    Each backend defines what a file provides (Python module path, C# namespace,
+    C++ header path) so resolution is one uniform string lookup across languages.
+    """
+    index: dict[str, set[str]] = {}
+    for f in _iter_source_files(root):
+        backend = backends.backend_for(f.name)
+        if backend is None:
+            continue
+        rel = _rel(root, f)
+        try:
+            src = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for key in _provides(backend, src, rel):
+            index.setdefault(key, set()).add(rel)
+    return index
 
 
 # ── slice context (slice mode) ─────────────────────────────────────
@@ -165,7 +166,8 @@ def get_slice_context(
         except OSError:
             pass
 
-    # BFS imports to `depth`, collecting in-project dependency files.
+    # BFS imports to `depth`, resolving via the repo-wide provides/import index.
+    index = _build_resolution_index(root)
     dep_files: dict[str, Path] = {}
     seen = set(module_rel)
     frontier = list(module_files)
@@ -179,16 +181,16 @@ def get_slice_context(
                 src = f.read_text(encoding="utf-8")
             except OSError:
                 continue
+            from_rel = _rel(root, f)
             for ref in backend.parse_imports(src):
-                dep = _resolve_import(root, f, ref)
-                if dep is None:
-                    continue
-                rel = _rel(root, dep)
-                if rel in seen:
-                    continue
-                seen.add(rel)
-                dep_files[rel] = dep
-                next_frontier.append(dep)
+                for key in _import_keys(backend, ref, from_rel):
+                    for dep_rel in index.get(key, ()):
+                        if dep_rel in seen:
+                            continue
+                        seen.add(dep_rel)
+                        dep = root / dep_rel
+                        dep_files[dep_rel] = dep
+                        next_frontier.append(dep)
         frontier = next_frontier
 
     dependencies: list[dict[str, Any]] = []

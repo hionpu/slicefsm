@@ -16,6 +16,15 @@ def _is_public(name: str) -> bool:
     return not name.startswith("_") or (name.startswith("__") and name.endswith("__"))
 
 
+def _dotted_variants(rel_path: str) -> list[str]:
+    """src/store/db.py -> ['src.store.db', 'store.db', 'db'] (progressive)."""
+    p = rel_path[:-3] if rel_path.endswith(".py") else rel_path
+    parts = [seg for seg in p.replace("\\", "/").split("/") if seg]
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return [".".join(parts[i:]) for i in range(len(parts)) if parts[i:]]
+
+
 def _node_start(node: ast.AST) -> int:
     """1-based start line including any decorators."""
     decorators = getattr(node, "decorator_list", None)
@@ -121,3 +130,20 @@ class PythonAstBackend:
             elif isinstance(node, ast.ImportFrom):
                 refs.append(ImportRef(module=node.module or "", level=node.level or 0))
         return refs
+
+    def provides_keys(self, source: str, rel_path: str) -> list[str]:
+        return _dotted_variants(rel_path)
+
+    def import_keys(self, ref: ImportRef, from_rel: str) -> list[str]:
+        if not ref.level:
+            return [ref.module] if ref.module else []
+        # Relative import: resolve against the importing file's package.
+        pkg = from_rel[:-3].split("/") if from_rel.endswith(".py") else from_rel.split("/")
+        if pkg and pkg[-1] == "__init__":
+            pkg = pkg[:-1]
+        else:
+            pkg = pkg[:-1]  # drop the module file -> its package
+        up = ref.level - 1
+        base = pkg[: len(pkg) - up] if up <= len(pkg) else []
+        parts = base + (ref.module.split(".") if ref.module else [])
+        return [".".join(parts)] if parts else []

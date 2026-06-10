@@ -314,12 +314,12 @@ This is the same mechanism as determinism: the hook serves only the current stat
 
 ## 12. Implementation status (built)
 
-Package: `slicefsm/` (Python, deps: `mcp` only — Python `ast` backend, no native build). Build order slices 1–5 done and unit-tested (74 tests pass).
+Package: `slicefsm/` (Python; deps: `mcp` + tree-sitter grammars, prebuilt wheels, no native build). Build order slices 1–5 done and unit-tested (89 tests pass). Languages: **Python (ast), C#, C++** (tree-sitter).
 
 | Slice | Module | State |
 |---|---|---|
 | 1 State core | `state.py` (FSM + atomic IO), `policy.py` (scale/read_policy/thresholds), `gatelog.py` | done |
-| 2 Context engine | `context_engine.py` + `backends/` (interface + Python `ast`; tree-sitter deferred behind same interface) | done |
+| 2 Context engine | `context_engine.py` + `backends/` (interface, Python `ast`, tree-sitter C#/C++). Resolution is index-based via `provides_keys`/`import_keys`: Python module path, C# namespace, C++ `#include`. | done |
 | 3 MCP tools | `ops.py` (logic) + `server.py` (7 thin tools), helpers `verify.py` / `failure.py` / `manual_checks.py` / `git_util.py` / `edits.py` | done |
 | 4 Hook dispatcher | `hook.py` — `python -m slicefsm.hook <event>`, pure `decide()` + IO | done |
 | 5 Human CLI | `cli.py` — `harness` (approve/explain/unstick/reslice/status), tty-gated | done |

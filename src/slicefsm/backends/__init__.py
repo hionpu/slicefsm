@@ -1,15 +1,16 @@
 """Language backends for the context engine.
 
 Each backend turns source text into symbol records and import refs. The engine
-stays language-agnostic; only the backend is language-specific. Python `ast` is
-the first concrete backend. A tree-sitter backend can be added behind the same
-interface later without touching the engine.
+stays language-agnostic; only the backend is language-specific. Python uses the
+stdlib `ast`; C# and C++ use tree-sitter (registered only if the grammar wheels
+are present, so a missing grammar degrades gracefully).
 """
 
 from __future__ import annotations
 
 from .base import ImportRef, LanguageBackend, SymbolRecord
 from .python_ast import PythonAstBackend
+from . import treesitter
 
 # extension -> backend instance
 _BACKENDS: dict[str, LanguageBackend] = {}
@@ -33,6 +34,19 @@ def known_extensions() -> tuple[str, ...]:
 
 register(PythonAstBackend())
 
+if treesitter.available():
+    register(treesitter.CSharpBackend())
+    register(treesitter.CppBackend())
+
+
+def available_languages() -> list[str]:
+    """Human-readable list of registered languages (for diagnostics)."""
+    langs = {"py": "python"}
+    if treesitter.available():
+        langs.update({"cs": "c#", "cpp": "c++"})
+    return sorted(set(langs.values()))
+
+
 __all__ = [
     "ImportRef",
     "LanguageBackend",
@@ -40,5 +54,6 @@ __all__ = [
     "PythonAstBackend",
     "backend_for",
     "known_extensions",
+    "available_languages",
     "register",
 ]
