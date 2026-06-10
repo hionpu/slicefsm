@@ -25,6 +25,7 @@ from . import edits, policy, state
 MCP_OPS = {
     "submit_feature",
     "propose_slices",
+    "list_slices",
     "get_slice_context",
     "expand_symbol",
     "run_verify",
@@ -32,16 +33,16 @@ MCP_OPS = {
     "track_manual_checks",
 }
 
+# Feature-phase -> allowed MCP ops. Slices run in parallel within IN_PROGRESS,
+# so all slice tools are allowed there; per-slice preconditions are enforced by
+# the tools themselves.
 PHASE_MCP: dict[str, set[str]] = {
     "NO_FEATURE": {"submit_feature"},
     "FEATURE_DONE": {"submit_feature"},
     "DISCOVERY": {"propose_slices"},
     "SLICING": {"propose_slices"},
     "AWAITING_APPROVAL": {"propose_slices"},
-    "SLICE_SCOPING": {"get_slice_context"},
-    "SLICE_IMPLEMENT": {"expand_symbol", "run_verify", "track_manual_checks", "analyze_verify_failure"},
-    "SLICE_VERIFY": {"run_verify", "analyze_verify_failure", "track_manual_checks", "expand_symbol"},
-    "STUCK": {"analyze_verify_failure"},
+    "IN_PROGRESS": {"list_slices", "get_slice_context", "expand_symbol", "run_verify", "analyze_verify_failure", "track_manual_checks"},
 }
 
 _EDIT_TOOLS = {"edit", "write", "multiedit", "notebookedit", "create", "apply_patch", "str_replace", "str_replace_editor"}
@@ -122,32 +123,32 @@ def decide(
             return True, ""
         return False, f"{op} is not allowed in {phase}. Allowed MCP here: {sorted(allowed) or 'none'}."
 
-    # 3. Edit/write: only in implement/verify, only within the slice scope
-    #    (existing module files OR new files under an edit root).
+    # 3. Edit/write: only while IN_PROGRESS, only within an ACTIVE slice's scope
+    #    (existing module files OR new files under an edit root). module_files /
+    #    edit_roots here are the UNION over all `implement` slices (parallel).
     if t in _EDIT_TOOLS:
-        if phase not in ("SLICE_IMPLEMENT", "SLICE_VERIFY"):
+        if phase != "IN_PROGRESS":
             return False, f"edits are not allowed in {phase}."
         rel = _target(tool_input, project_root)
-        if module_files is None and not edit_roots:
-            return False, "no slice context loaded; call get_slice_context first."
+        if not module_files and not edit_roots:
+            return False, "no active slice; call get_slice_context(slice_id) to start or resume one."
         if _in_scope(rel, module_files, edit_roots):
             return True, ""
         allowed = edit_roots or sorted(module_files or [])
         return False, (
-            f"'{rel}' is outside the slice module. Allowed scope: {allowed}. "
-            "For an out-of-module change, stop and get human approval."
+            f"'{rel}' is outside every active slice. Allowed scope: {allowed}. "
+            "For an out-of-scope change, stop and get human approval."
         )
 
-    # 4. Read: bounded in implement/verify/stuck per read_mode.
+    # 4. Read: bounded to active slices while IN_PROGRESS, per read_mode.
     if t in _READ_TOOLS:
-        if phase in ("SLICE_IMPLEMENT", "SLICE_VERIFY", "STUCK"):
+        if phase == "IN_PROGRESS" and (module_files or edit_roots):
             rel = _target(tool_input, project_root)
-            in_scope = _in_scope(rel, module_files, edit_roots)
-            if rel and not in_scope:
-                if phase == "STUCK" or read_mode == "strict":
+            if rel and not _in_scope(rel, module_files, edit_roots):
+                if read_mode == "strict":
                     return False, (
-                        f"strict read: '{rel}' is outside the slice. Use expand_symbol for a "
-                        "dependency body, or declare a boundary-cross to the human."
+                        f"strict read: '{rel}' is outside the active slice(s). Use expand_symbol "
+                        "for a dependency body, or declare a boundary-cross to the human."
                     )
                 return True, ""  # relaxed: allowed (PostToolUse logs it)
         return True, ""
@@ -160,46 +161,69 @@ def decide(
 # ── IO / dispatch ──────────────────────────────────────────────────
 
 
-def _manifest_scope(s: dict[str, Any]) -> tuple[list[str] | None, list[str]]:
-    """Return (module_files, edit_roots) from the current slice's manifest."""
-    cs = state.current_slice(s)
-    manifest = cs.get("manifest") if cs else None
+def _load_manifest(manifest: str | None) -> tuple[list[str], list[str]]:
     if not manifest:
-        return None, []
+        return [], []
     try:
         man = json.loads(Path(manifest).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None, []
+        return [], []
     mf = man.get("module_files")
     er = man.get("edit_roots")
-    return (mf if isinstance(mf, list) else None, er if isinstance(er, list) else [])
+    return (mf if isinstance(mf, list) else [], er if isinstance(er, list) else [])
+
+
+def _active_scope(s: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Union of (module_files, edit_roots) over all `implement` slices."""
+    mf: list[str] = []
+    er: list[str] = []
+    for sl in state.active_slices(s):
+        m, e = _load_manifest(sl.get("manifest"))
+        mf.extend(m)
+        er.extend(e)
+    return mf, er
+
+
+def _slice_for_path(s: dict[str, Any], rel: str | None) -> Any:
+    """Which active slice's scope contains rel (for authorship attribution)."""
+    if rel is None:
+        return None
+    for sl in state.active_slices(s):
+        mf, er = _load_manifest(sl.get("manifest"))
+        if _in_scope(rel, mf, er):
+            return sl.get("id")
+    return None
 
 
 def build_state_prompt(s: dict[str, Any]) -> str:
     phase = s.get("phase", "NO_FEATURE")
     read_mode = (s.get("read_policy") or {}).get("mode", "strict")
-    cs = state.current_slice(s)
-    n = len(s.get("slices", []))
-    cur = s.get("current_slice")
-    slice_line = ""
-    if cs:
-        slice_line = f' Slice {cur}/{n}: "{cs.get("title","")}" (module: {cs.get("module","?")}).'
+
+    if phase == "IN_PROGRESS":
+        rows = [
+            f'  #{x.get("id")} [{x.get("status")}] "{x.get("title","")}" ({x.get("module","?")})'
+            for x in s.get("slices", [])
+        ]
+        active = [x.get("id") for x in state.active_slices(s)]
+        text = (
+            "IN_PROGRESS. Slices (work them in parallel across sessions):\n"
+            + "\n".join(rows)
+            + f"\nActive (editable now): {active or 'none'}. "
+            "Call get_slice_context(slice_id) to start a 'proposed' slice or resume an 'implement' one. "
+            "Edit only within active slices; new files inside their dirs are fine. "
+            "Pass slice_id to expand_symbol / run_verify. A stuck slice needs `harness unstick <id>`. "
+            f"Read mode: {read_mode}."
+        )
+        return f"[slicefsm] {text}"
 
     base = {
         "NO_FEATURE": "No active feature. To start, call submit_feature(desc). No edits until a feature is sliced and approved.",
         "DISCOVERY": "DISCOVERY (read-only). Scan the code to understand structure. No edits. When ready, call propose_slices(slices, discovery_summary=...).",
         "SLICING": "SLICING. Split the feature into vertical, user-visible slices. No edits. Call propose_slices(slices).",
         "AWAITING_APPROVAL": "AWAITING_APPROVAL. Slices are proposed. Only the human can approve (out-of-band: harness approve). Do not start implementing.",
-        "SLICE_SCOPING": "SLICE_SCOPING.{slice} First action: get_slice_context(module). No edits until the context is loaded.",
-        "SLICE_IMPLEMENT": "SLICE_IMPLEMENT.{slice} Edit only within the loaded module (new files inside it are fine). For a dependency body, call expand_symbol — do not read the whole file. When verify_how is satisfiable, call run_verify. If verify just failed, call analyze_verify_failure before re-editing.",
-        "SLICE_VERIFY": "SLICE_VERIFY.{slice} Run run_verify. On failure, call analyze_verify_failure before patching.",
-        "STUCK": "STUCK.{slice} Verify failed repeatedly. STOP editing. Diagnose only (analyze_verify_failure), then ask the human to run: harness unstick.",
         "FEATURE_DONE": "FEATURE_DONE. The feature is closed. Start a new one with submit_feature.",
     }.get(phase, "Unknown phase.")
-    text = base.replace("{slice}", slice_line)
-    if phase in ("SLICE_IMPLEMENT", "SLICE_VERIFY"):
-        text += f" Read mode: {read_mode}."
-    return f"[slicefsm] {text}"
+    return f"[slicefsm] {base}"
 
 
 def _emit(obj: dict[str, Any]) -> None:
@@ -221,7 +245,7 @@ def _handle_pretooluse(project_root: str, event: dict[str, Any]) -> int:
     s = state.read(project_root)
     phase = s.get("phase", "NO_FEATURE")
     read_mode = (s.get("read_policy") or {}).get("mode", "strict")
-    module_files, edit_roots = _manifest_scope(s)
+    module_files, edit_roots = _active_scope(s)
     allow, reason = decide(
         phase,
         event.get("tool_name", ""),
@@ -244,12 +268,12 @@ def _handle_pretooluse(project_root: str, event: dict[str, Any]) -> int:
 
 def _handle_posttooluse(project_root: str, event: dict[str, Any]) -> int:
     s = state.read(project_root)
-    if s.get("phase") in ("SLICE_IMPLEMENT", "SLICE_VERIFY"):
+    if s.get("phase") == "IN_PROGRESS":
         t = str(event.get("tool_name", "")).lower()
         if t in _EDIT_TOOLS:
             rel = _target(event.get("tool_input", {}), project_root)
             if rel:
-                edits.append_edit(project_root, s.get("current_slice"), rel, t)
+                edits.append_edit(project_root, _slice_for_path(s, rel), rel, t)
     return 0
 
 

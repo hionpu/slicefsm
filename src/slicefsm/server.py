@@ -29,27 +29,33 @@ def propose_slices(project_root: str, slices: list[dict[str, Any]], discovery_su
 
 
 @mcp.tool()
-def get_slice_context(project_root: str, module: str, depth: int = 1, feature: str | None = None) -> dict[str, Any]:
-    """First action of a slice. Returns own-module full text + dep signatures + excluded names, writes a rollback checkpoint. Phase SLICE_SCOPING only."""
-    return ops.get_slice_context(project_root, module, depth=depth, feature=feature)
+def list_slices(project_root: str) -> dict[str, Any]:
+    """List all slices and their status (proposed/implement/stuck/done). Use to pick a slice to start or resume."""
+    return ops.list_slices(project_root)
 
 
 @mcp.tool()
-def expand_symbol(project_root: str, name: str, source_path: str | None = None, reason: str | None = None) -> dict[str, Any]:
-    """Reveal one dependency symbol's body (logged). Use instead of reading the whole file. Phase SLICE_IMPLEMENT/SLICE_VERIFY."""
-    return ops.expand_symbol(project_root, name, source_path=source_path, reason=reason)
+def get_slice_context(project_root: str, slice_id: int, module: str | None = None, depth: int = 1, feature: str | None = None) -> dict[str, Any]:
+    """Start or resume a slice: returns own-module full text + dep signatures + excluded names, writes a rollback checkpoint. Feature phase IN_PROGRESS."""
+    return ops.get_slice_context(project_root, slice_id, module=module, depth=depth, feature=feature)
 
 
 @mcp.tool()
-def run_verify(project_root: str, feature: str | None = None) -> dict[str, Any]:
-    """Run the verify suite. On pass: advance slice or finish. On repeated fail: STUCK. Phase SLICE_IMPLEMENT/SLICE_VERIFY."""
-    return ops.run_verify(project_root, feature=feature)
+def expand_symbol(project_root: str, slice_id: int, name: str, source_path: str | None = None, reason: str | None = None) -> dict[str, Any]:
+    """Reveal one dependency symbol's body for a slice (logged). Use instead of reading the whole file."""
+    return ops.expand_symbol(project_root, slice_id, name, source_path=source_path, reason=reason)
 
 
 @mcp.tool()
-def analyze_verify_failure(project_root: str, failed_step: str, suspect_paths: list[str] | None = None, contract_paths: list[str] | None = None) -> dict[str, Any]:
-    """Classify a failure as contract-sensitive (no blind patch) or routine. Phase SLICE_VERIFY/STUCK."""
-    return ops.analyze_verify_failure(project_root, failed_step, suspect_paths=suspect_paths, contract_paths=contract_paths)
+def run_verify(project_root: str, slice_id: int, feature: str | None = None) -> dict[str, Any]:
+    """Run the verify suite for a slice. On pass: mark it done (and finish the feature if it was the last). On repeated fail: stuck."""
+    return ops.run_verify(project_root, slice_id, feature=feature)
+
+
+@mcp.tool()
+def analyze_verify_failure(project_root: str, failed_step: str, slice_id: int | None = None, suspect_paths: list[str] | None = None, contract_paths: list[str] | None = None) -> dict[str, Any]:
+    """Classify a failure as contract-sensitive (no blind patch) or routine. Feature phase IN_PROGRESS."""
+    return ops.analyze_verify_failure(project_root, failed_step, slice_id=slice_id, suspect_paths=suspect_paths, contract_paths=contract_paths)
 
 
 @mcp.tool()

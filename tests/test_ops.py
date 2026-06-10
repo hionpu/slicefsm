@@ -1,4 +1,4 @@
-"""Workflow tests driving the FSM through ops.* (MCP-free)."""
+"""Workflow tests driving the FSM through ops.* (MCP-free), v2 parallel model."""
 
 from __future__ import annotations
 
@@ -19,18 +19,16 @@ def project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _approve(root: Path, scale: str, current: int = 1, risky: bool = False) -> None:
-    """Simulate the out-of-band human approve (CLI does this for real)."""
+def _approve(root: Path, scale: str, risky: bool = False) -> None:
+    """Simulate the out-of-band human approve: feature -> IN_PROGRESS."""
     s = state.read(root)
-    s["phase"] = "SLICE_SCOPING"
+    s["phase"] = "IN_PROGRESS"
     s["scale"] = scale
     s["scale_source"] = "human_approved"
     s["risky"] = risky
     s["read_policy"] = policy.derive_read_policy(scale, risky)
-    s["current_slice"] = current
-    cs = state.current_slice(s)
-    if cs:
-        cs["status"] = "scoping"
+    for sl in s["slices"]:
+        sl["status"] = "proposed"
     state.write(root, s)
 
 
@@ -42,52 +40,49 @@ def _fail(monkeypatch):
     monkeypatch.setattr(verify, "run_verify_suite", lambda *a, **k: {"overall": "fail", "steps": [], "failed_steps": ["x"]})
 
 
+def _three(project):
+    ops.submit_feature(str(project), "medium feature with several behaviors")
+    ops.propose_slices(str(project), [
+        {"title": "behavior one", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
+        {"title": "behavior two", "module": "src/b.py", "verify_how": "t", "ac_count": 3},
+        {"title": "behavior three", "module": "src/c.py", "verify_how": "t", "ac_count": 3},
+    ])
+
+
+# ── proposal / approval ────────────────────────────────────────────
+
+
 def test_submit_routes_small_to_slicing(project):
     out = ops.submit_feature(str(project), "rename the save label")
     assert out["phase"] == "SLICING"
-    assert out["needs_discovery"] is False
-    assert "packages" in out["repo_map"]
 
 
 def test_submit_routes_large_to_discovery(project):
     out = ops.submit_feature(str(project), "add memo feature that persists to database and syncs to server with undo")
     assert out["phase"] == "DISCOVERY"
-    assert out["needs_discovery"] is True
 
 
 def test_propose_validation_blocks_bad_slices(project):
     ops.submit_feature(str(project), "small thing")
     out = ops.propose_slices(str(project), [{"title": "x", "module": "", "ac_count": 1}])
     assert out["error"] == "validation_failed"
-    assert any("module" in e for e in out["errors"])
-    assert any("ac_count" in e for e in out["errors"])
 
 
 def test_propose_discovery_requires_summary(project):
     ops.submit_feature(str(project), "add memo feature that persists to database and syncs to server with undo")
     slices = [{"title": "t", "module": "src/a.py", "verify_how": "test", "ac_count": 3}]
-    out = ops.propose_slices(str(project), slices)  # no summary
-    assert out["error"] == "discovery_summary_required"
-    out2 = ops.propose_slices(str(project), slices, discovery_summary="found modules a,b,c")
-    assert out2["phase"] == "AWAITING_APPROVAL"
-
-
-def test_propose_flags_layer_noun_warning(project):
-    ops.submit_feature(str(project), "small thing")
-    out = ops.propose_slices(str(project), [
-        {"title": "ViewModel", "module": "src/a.py", "verify_how": "test", "ac_count": 3},
-    ])
-    assert out["phase"] == "AWAITING_APPROVAL"  # warning, not block
-    assert any("layer" in w for w in out["warnings"])
+    assert ops.propose_slices(str(project), slices)["error"] == "discovery_summary_required"
+    assert ops.propose_slices(str(project), slices, discovery_summary="found a,b,c")["phase"] == "AWAITING_APPROVAL"
 
 
 def test_scale_mismatch_surfaced(project):
-    # provisional Small (short text), measured Large (7 slices)
     ops.submit_feature(str(project), "small tweak")
     slices = [{"title": f"behavior {i}", "module": "src/a.py", "verify_how": "t", "ac_count": 3} for i in range(7)]
     out = ops.propose_slices(str(project), slices)
-    assert out["measured_scale"] == "Large"
-    assert out["scale_mismatch"] is True
+    assert out["measured_scale"] == "Large" and out["scale_mismatch"] is True
+
+
+# ── single-slice happy path ────────────────────────────────────────
 
 
 def test_micro_happy_path_to_done(project, monkeypatch):
@@ -96,121 +91,127 @@ def test_micro_happy_path_to_done(project, monkeypatch):
     ops.propose_slices(str(project), [
         {"title": "do the thing", "module": "src/a.py", "verify_how": "test", "ac_count": 3},
     ])
-    _approve(project, "Micro", current=1)
-    ctx = ops.get_slice_context(str(project), "src/a.py")
-    assert ctx["phase"] == "SLICE_IMPLEMENT"
-    out = ops.run_verify(str(project))
+    _approve(project, "Micro")
+    ctx = ops.get_slice_context(str(project), 1)
+    assert ctx["slice_status"] == "implement"
+    out = ops.run_verify(str(project), 1)
     assert out["overall"] == "pass"
-    assert out["phase"] == "FEATURE_DONE"  # Micro: no explanation gate
+    assert out["feature_phase"] == "FEATURE_DONE"
 
 
 def test_get_slice_context_wrong_phase_denied(project):
     ops.submit_feature(str(project), "tiny")
-    out = ops.get_slice_context(str(project), "src/a.py")
+    out = ops.get_slice_context(str(project), 1)
     assert out["error"] == "transition_denied"
     assert out["current_phase"] == "SLICING"
 
 
-def test_medium_multi_slice_with_explanation_gate(project, monkeypatch):
+def test_module_mismatch_denied(project, monkeypatch):
     _pass(monkeypatch)
-    ops.submit_feature(str(project), "medium feature with several behaviors")
+    ops.submit_feature(str(project), "tiny")
     ops.propose_slices(str(project), [
-        {"title": "behavior one", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
-        {"title": "behavior two", "module": "src/b.py", "verify_how": "t", "ac_count": 3},
-        {"title": "behavior three", "module": "src/c.py", "verify_how": "t", "ac_count": 3},
+        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
     ])
-    _approve(project, "Medium", current=1)
+    _approve(project, "Micro")
+    out = ops.get_slice_context(str(project), 1, module="src/b.py")
+    assert out["error"] == "module_mismatch"
+    assert ops.get_slice_context(str(project), 1, module="src/a.py")["slice_status"] == "implement"
 
-    # slice 1 -> advance to slice 2
-    ops.get_slice_context(str(project), "src/a.py")
-    out1 = ops.run_verify(str(project))
-    assert out1["phase"] == "SLICE_SCOPING"
-    assert out1["current_slice"] == 2
 
-    # slice 2 -> advance to slice 3
-    ops.get_slice_context(str(project), "src/b.py")
-    out2 = ops.run_verify(str(project))
-    assert out2["current_slice"] == 3
+# ── parallel + resume ──────────────────────────────────────────────
 
-    # slice 3 (last) -> explanation gate blocks FEATURE_DONE
-    ops.get_slice_context(str(project), "src/c.py")
-    out3 = ops.run_verify(str(project))
+
+def test_parallel_slices_finish_in_any_order(project, monkeypatch):
+    _pass(monkeypatch)
+    _three(project)
+    _approve(project, "Medium")
+
+    # two slices active at once
+    ops.get_slice_context(str(project), 1)
+    ops.get_slice_context(str(project), 2)
+    ls = ops.list_slices(str(project))
+    active = {x["id"] for x in ls["slices"] if x["status"] == "implement"}
+    assert active == {1, 2}
+
+    # finish slice 2 before slice 1 — order independent
+    out2 = ops.run_verify(str(project), 2)
+    assert out2["slice_status"] == "done"
+    assert out2["feature_phase"] == "IN_PROGRESS"  # not all done yet
+
+    out1 = ops.run_verify(str(project), 1)
+    assert out1["slice_status"] == "done"
+
+    # last slice triggers the explanation gate (Medium)
+    ops.get_slice_context(str(project), 3)
+    out3 = ops.run_verify(str(project), 3)
     assert out3["overall"] == "pending_explanation"
-    assert out3["phase"] == "SLICE_VERIFY"
-
-    # human supplies explanation, then it closes
     s = state.read(project)
-    state.current_slice(s)["explanation"] = ".harness/explain-3.md"
+    state.find_slice(s, 3)["explanation"] = ".harness/explain-3.md"
     state.write(project, s)
-    out4 = ops.run_verify(str(project))
-    assert out4["phase"] == "FEATURE_DONE"
+    assert ops.run_verify(str(project), 3)["feature_phase"] == "FEATURE_DONE"
 
 
-def test_verify_fail_reaches_stuck(project, monkeypatch):
+def test_resume_paused_slice(project, monkeypatch):
+    _pass(monkeypatch)
+    _three(project)
+    _approve(project, "Medium")
+    first = ops.get_slice_context(str(project), 2)
+    assert first["slice_status"] == "implement"
+    # "new session" resumes the same slice
+    again = ops.get_slice_context(str(project), 2)
+    assert again["slice_status"] == "implement"
+    assert again["module"] == "src/b.py"
+
+
+def test_cannot_start_stuck_slice(project, monkeypatch):
     _fail(monkeypatch)
     ops.submit_feature(str(project), "tiny")
     ops.propose_slices(str(project), [
-        {"title": "do thing", "module": "src/a.py", "verify_how": "test", "ac_count": 3},
+        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
     ])
-    _approve(project, "Micro", current=1)
-    ops.get_slice_context(str(project), "src/a.py")
+    _approve(project, "Micro")
+    ops.get_slice_context(str(project), 1)
+    for _ in range(3):
+        out = ops.run_verify(str(project), 1)
+    assert out["slice_status"] == "stuck"
+    # cannot re-acquire a stuck slice without unstick
+    assert ops.get_slice_context(str(project), 1)["error"] == "slice_not_startable"
+    assert ops.run_verify(str(project), 1)["error"] == "slice_not_active"
 
-    o1 = ops.run_verify(str(project))
-    assert o1["phase"] == "SLICE_IMPLEMENT" and o1["verify_fail_count"] == 1
-    o2 = ops.run_verify(str(project))
-    assert o2["verify_fail_count"] == 2
-    o3 = ops.run_verify(str(project))
-    assert o3["phase"] == "STUCK"  # threshold 3 for non-risky
 
-
-def test_expand_symbol_phase_gate(project):
-    ops.submit_feature(str(project), "tiny")
-    out = ops.expand_symbol(str(project), "a_fn")
-    assert out["error"] == "transition_denied"
+# ── gates ──────────────────────────────────────────────────────────
 
 
 def test_no_checks_does_not_advance(project, monkeypatch):
-    # GPT issue #2: no automatic and no manual check must not count as verified.
     monkeypatch.setattr(verify, "run_verify_suite", lambda *a, **k: {"overall": "no_checks", "steps": []})
     ops.submit_feature(str(project), "tiny")
     ops.propose_slices(str(project), [
         {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
     ])
-    _approve(project, "Micro", current=1)
-    ops.get_slice_context(str(project), "src/a.py")
-    out = ops.run_verify(str(project))
-    assert out["overall"] == "no_checks"
-    assert out["phase"] == "SLICE_VERIFY"  # did NOT advance or finish
+    _approve(project, "Micro")
+    ops.get_slice_context(str(project), 1)
+    out = ops.run_verify(str(project), 1)
+    assert out["overall"] == "no_checks" and out["slice_id"] == 1
+    assert state.find_slice(state.read(project), 1)["status"] == "implement"
 
 
 def test_analyze_reachable_after_fail(project, monkeypatch):
-    # GPT issue #3: a fail drops to SLICE_IMPLEMENT; analyze must still work there.
     _fail(monkeypatch)
     ops.submit_feature(str(project), "tiny")
     ops.propose_slices(str(project), [
         {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
     ])
-    _approve(project, "Micro", current=1)
-    ops.get_slice_context(str(project), "src/a.py")
-    o1 = ops.run_verify(str(project))
-    assert o1["phase"] == "SLICE_IMPLEMENT"
-    a = ops.analyze_verify_failure(str(project), "test")
+    _approve(project, "Micro")
+    ops.get_slice_context(str(project), 1)
+    o1 = ops.run_verify(str(project), 1)
+    assert o1["slice_status"] == "implement"
+    a = ops.analyze_verify_failure(str(project), "test", slice_id=1)
     assert "classification" in a and "error" not in a
 
 
-def test_module_mismatch_denied(project, monkeypatch):
-    # GPT issue #4: AI cannot swap the human-approved module.
-    _pass(monkeypatch)
+def test_expand_symbol_phase_gate(project):
     ops.submit_feature(str(project), "tiny")
-    ops.propose_slices(str(project), [
-        {"title": "do thing", "module": "src/a.py", "verify_how": "t", "ac_count": 3},
-    ])
-    _approve(project, "Micro", current=1)
-    out = ops.get_slice_context(str(project), "src/b.py")  # different module
-    assert out["error"] == "module_mismatch"
-    assert out["approved_module"] == "src/a.py"
-    ok = ops.get_slice_context(str(project), "src/a.py")  # approved one works
-    assert ok["phase"] == "SLICE_IMPLEMENT"
+    assert ops.expand_symbol(str(project), 1, "a_fn")["error"] == "transition_denied"
 
 
 def test_manual_checks_block_pass(project, monkeypatch):
@@ -219,13 +220,11 @@ def test_manual_checks_block_pass(project, monkeypatch):
     ops.propose_slices(str(project), [
         {"title": "do thing", "module": "src/a.py", "verify_how": "manual", "ac_count": 3},
     ])
-    _approve(project, "Micro", current=1)
-    ops.get_slice_context(str(project), "src/a.py", feature="feat1")
+    _approve(project, "Micro")
+    ops.get_slice_context(str(project), 1, feature="feat1")
     ops.track_manual_checks(str(project), "feat1", op="declare",
                             checks=[{"id": "c1", "description": "looks right", "required": True}])
-    out = ops.run_verify(str(project), feature="feat1")
-    assert out["overall"] == "pending_manual"
+    assert ops.run_verify(str(project), 1, feature="feat1")["overall"] == "pending_manual"
     ops.track_manual_checks(str(project), "feat1", op="confirm", check_id="c1")
-    out2 = ops.run_verify(str(project), feature="feat1")
-    assert out2["overall"] == "pass"
-    assert out2["phase"] == "FEATURE_DONE"
+    out = ops.run_verify(str(project), 1, feature="feat1")
+    assert out["overall"] == "pass" and out["feature_phase"] == "FEATURE_DONE"

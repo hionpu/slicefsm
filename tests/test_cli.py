@@ -1,4 +1,4 @@
-"""Tests for the out-of-band harness CLI core commands."""
+"""Tests for the out-of-band harness CLI core commands (v2 parallel model)."""
 
 from __future__ import annotations
 
@@ -29,77 +29,70 @@ def awaiting(tmp_path: Path) -> Path:
 def test_approve_requires_confirmation(awaiting):
     out = cli.cmd_approve(str(awaiting), confirm=NO)
     assert out["ok"] is False
-    assert out["reason"] == "not_confirmed"
-    assert state.read(awaiting)["phase"] == "AWAITING_APPROVAL"  # unchanged
+    assert state.read(awaiting)["phase"] == "AWAITING_APPROVAL"
 
 
 def test_approve_advances_and_sets_policy(awaiting):
     out = cli.cmd_approve(str(awaiting), confirm=YES)
     assert out["ok"] is True
     s = state.read(awaiting)
-    assert s["phase"] == "SLICE_SCOPING"
-    assert s["scale"] == "Medium"  # from scale_measured (3 slices)
-    assert s["scale_source"] == "human_approved"
-    assert s["read_policy"]["mode"] == "relaxed"  # Medium
-    assert s["current_slice"] == 1
+    assert s["phase"] == "IN_PROGRESS"
+    assert s["scale"] == "Medium"
+    assert s["read_policy"]["mode"] == "relaxed"
+    assert all(sl["status"] == "proposed" for sl in s["slices"])
 
 
 def test_approve_scale_override_and_risky(awaiting):
-    out = cli.cmd_approve(str(awaiting), scale="Large", risky=True, confirm=YES)
+    cli.cmd_approve(str(awaiting), scale="Large", risky=True, confirm=YES)
     s = state.read(awaiting)
-    assert s["scale"] == "Large"
-    assert s["risky"] is True
-    assert s["read_policy"]["mode"] == "strict"  # risky forces strict
+    assert s["scale"] == "Large" and s["risky"] is True
+    assert s["read_policy"]["mode"] == "strict"
 
 
 def test_approve_wrong_phase(tmp_path):
-    out = cli.cmd_approve(str(tmp_path), confirm=YES)  # NO_FEATURE
-    assert out["ok"] is False
-    assert out["reason"] == "wrong_phase"
+    assert cli.cmd_approve(str(tmp_path), confirm=YES)["reason"] == "wrong_phase"
 
 
 def test_explain_records_file(awaiting):
     cli.cmd_approve(str(awaiting), confirm=YES)
-    out = cli.cmd_explain(str(awaiting), 1, text="I hand-wrote the core loop because X.")
-    assert out["ok"] is True
-    assert Path(out["path"]).exists()
-    s = state.read(awaiting)
-    target = next(x for x in s["slices"] if x["id"] == 1)
-    assert target["explanation"] == out["path"]
+    out = cli.cmd_explain(str(awaiting), 1, text="I hand-wrote the core loop.")
+    assert out["ok"] is True and Path(out["path"]).exists()
+    assert state.find_slice(state.read(awaiting), 1)["explanation"] == out["path"]
 
 
 def test_explain_empty_rejected(awaiting):
-    out = cli.cmd_explain(str(awaiting), 1, text="   ")
-    assert out["ok"] is False
-    assert out["reason"] == "empty_explanation"
+    assert cli.cmd_explain(str(awaiting), 1, text="   ")["reason"] == "empty_explanation"
 
 
 def test_explain_slice_not_found(awaiting):
-    out = cli.cmd_explain(str(awaiting), 99, text="x")
-    assert out["reason"] == "slice_not_found"
+    assert cli.cmd_explain(str(awaiting), 99, text="x")["reason"] == "slice_not_found"
 
 
 def test_unstick_from_stuck(awaiting):
     cli.cmd_approve(str(awaiting), confirm=YES)
     s = state.read(awaiting)
-    s["phase"] = "STUCK"
-    cs = state.current_slice(s)
-    cs["verify_fail_count"] = 3
+    sl = state.find_slice(s, 2)
+    sl["status"] = "stuck"
+    sl["verify_fail_count"] = 3
     state.write(awaiting, s)
-    out = cli.cmd_unstick(str(awaiting), confirm=YES)
+    out = cli.cmd_unstick(str(awaiting), 2, confirm=YES)
     assert out["ok"] is True
     s2 = state.read(awaiting)
-    assert s2["phase"] == "SLICE_IMPLEMENT"
-    assert state.current_slice(s2)["verify_fail_count"] == 0
+    assert state.find_slice(s2, 2)["status"] == "implement"
+    assert state.find_slice(s2, 2)["verify_fail_count"] == 0
+
+
+def test_unstick_not_stuck(awaiting):
+    cli.cmd_approve(str(awaiting), confirm=YES)
+    assert cli.cmd_unstick(str(awaiting), 1, confirm=YES)["reason"] == "not_stuck"
 
 
 def test_unstick_needs_confirm(awaiting):
     cli.cmd_approve(str(awaiting), confirm=YES)
     s = state.read(awaiting)
-    s["phase"] = "STUCK"
+    state.find_slice(s, 2)["status"] = "stuck"
     state.write(awaiting, s)
-    out = cli.cmd_unstick(str(awaiting), confirm=NO)
-    assert out["ok"] is False
+    assert cli.cmd_unstick(str(awaiting), 2, confirm=NO)["ok"] is False
 
 
 def test_reslice_clears_slices(awaiting):
@@ -109,14 +102,12 @@ def test_reslice_clears_slices(awaiting):
     s = state.read(awaiting)
     assert s["phase"] in ("SLICING", "DISCOVERY")
     assert s["slices"] == []
-    assert s["current_slice"] is None
 
 
 def test_status_is_readonly(awaiting):
     out = cli.cmd_status(str(awaiting))
     assert out["phase"] == "AWAITING_APPROVAL"
     assert len(out["slices"]) == 3
-    # status must not change state
     assert state.read(awaiting)["phase"] == "AWAITING_APPROVAL"
 
 

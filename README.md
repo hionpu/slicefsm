@@ -38,10 +38,14 @@ Update: `.../slicefsm/master/update.sh`. Uninstall: `.../slicefsm/master/uninsta
 ## State machine
 
 ```
-NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL
-  → SLICE_SCOPING → SLICE_IMPLEMENT ⇄ SLICE_VERIFY → FEATURE_DONE
-                          (3 fails → STUCK)
+NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL → IN_PROGRESS → FEATURE_DONE
+
+IN_PROGRESS holds N slices, each with its own status (run in parallel):
+  proposed → implement ⇄ (run_verify) → done
+  implement → stuck (N fails) → (harness unstick) → implement
 ```
+
+One slice per session; any session can start a new slice or resume a paused one.
 
 ## Components
 

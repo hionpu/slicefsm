@@ -331,6 +331,15 @@ Install/uninstall/update: `slicefsm/{install,uninstall,update}.sh`, one-liner vi
 
 **Deltas from the design above:**
 - Hook command is `python -m slicefsm.hook <event>`, not a `harness-hook` console script (PATH-safe, matches the MCP `python -m` form).
-- DISCOVERY exit folds into `propose_slices(discovery_summary=...)` — no separate tool, to hold tool count at 7.
+- DISCOVERY exit folds into `propose_slices(discovery_summary=...)` — no separate tool.
 - Self-approve block also catches the `python -m slicefsm.cli <verb>` form and `reslice`, not just `harness approve`.
-- Checkpoint writes on the `get_slice_context` (SCOPING→IMPLEMENT) call.
+- Checkpoint writes on the `get_slice_context` call.
+
+**v2 — parallel slices (supersedes the sequential FSM in §2–§7).** Sections 2–7 describe the original *one-slice-at-a-time* model. The shipped model replaces the single `current_slice` pointer + per-slice global phases (SLICE_SCOPING/IMPLEMENT/VERIFY/STUCK) with:
+- a **feature-level** phase: `NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL → IN_PROGRESS → FEATURE_DONE`;
+- a **per-slice status** (`proposed / implement / stuck / done`) so several slices run at once;
+- tools take an explicit `slice_id`; new `list_slices` tool (8 tools total); `get_slice_context(slice_id)` starts or **resumes** a slice;
+- the PreToolUse hook gates edits/reads against the **union** of all `implement` slices' scopes (MCP cannot see the agent's session id, so it cannot bind a session to one slice — the trade for parallelism is that any active slice's module is editable from any session);
+- `harness approve` → `IN_PROGRESS` (all slices `proposed`); `harness unstick <id>` takes a slice id; feature is `FEATURE_DONE` when all slices are `done`.
+
+The current operational spec is **SKILL.md**. Tests: 86 pass.

@@ -56,15 +56,18 @@ The harness runs **many short sessions** (one slice, one session), so fixed per-
 ## The state machine
 
 ```
-NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL
-  → SLICE_SCOPING → SLICE_IMPLEMENT ⇄ SLICE_VERIFY → FEATURE_DONE
-                          (3 fails → STUCK)
+NO_FEATURE → [DISCOVERY] → SLICING → AWAITING_APPROVAL → IN_PROGRESS → FEATURE_DONE
+
+IN_PROGRESS holds N slices, each with its own status (run in parallel):
+  proposed → implement ⇄ (run_verify) → done
+  implement → stuck (N fails) → (harness unstick) → implement
 ```
 
 - **DISCOVERY** runs only for Medium/Large features: a read-only scan to slice well before any edit. Micro/Small skip it.
-- **AWAITING_APPROVAL** is the human gate. Only `harness approve` (a terminal command the AI cannot run) advances it.
-- **SLICE_IMPLEMENT ⇄ SLICE_VERIFY** is the work loop. Edits stay inside the slice's module.
-- **STUCK** triggers after repeated verify failures. It bans new edits — the AI must diagnose and ask the human to `harness unstick`, instead of layering bad patches.
+- **AWAITING_APPROVAL** is the human gate. Only `harness approve` (a terminal command the AI cannot run) advances it; it approves the whole slice set.
+- **IN_PROGRESS** runs slices in parallel. Each session works one slice (`get_slice_context(slice_id)`); a new session can start another slice or resume a paused one. The hook bounds edits to the union of the active slices.
+- **stuck** triggers after repeated verify failures on a slice. It bans new edits to that slice — the AI must diagnose and ask the human to `harness unstick <id>`, instead of layering bad patches.
+- The feature is **FEATURE_DONE** when every slice is `done`.
 
 Scale is set in three steps so no single actor owns it silently: the AI *guesses* it from the feature text, the harness *measures* it from the real slice signals at proposal time, and the human *confirms* it at approval. Scale then derives read-strictness, whether DISCOVERY runs, and how much explanation the last slice needs.
 

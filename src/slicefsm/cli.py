@@ -78,19 +78,18 @@ def cmd_approve(
         st["scale_source"] = "human_approved"
         st["risky"] = bool(risky)
         st["read_policy"] = policy.derive_read_policy(final_scale, bool(risky))
-        st["current_slice"] = 1
+        # All slices become startable; any session can pick one (parallel).
         for sl in st.get("slices", []):
-            if sl.get("id") == 1:
-                sl["status"] = "scoping"
+            sl["status"] = "proposed"
         st["approved"] = {"at": _now(), "by": "human", "note": note or ""}
 
     try:
-        state.transition(s, "SLICE_SCOPING", expect="AWAITING_APPROVAL", mutator=mut)
+        state.transition(s, "IN_PROGRESS", expect="AWAITING_APPROVAL", mutator=mut)
     except state.TransitionDenied as e:
         return e.payload
     state.write(project_root, s)
     gatelog.append_gate_event(project_root, "harness_approve", {"scale": final_scale, "risky": bool(risky)})
-    return {"ok": True, "phase": "SLICE_SCOPING", "scale": final_scale, "read_policy": s["read_policy"]}
+    return {"ok": True, "phase": "IN_PROGRESS", "scale": final_scale, "read_policy": s["read_policy"]}
 
 
 def cmd_explain(
@@ -126,28 +125,23 @@ def cmd_explain(
 
 def cmd_unstick(
     project_root: str,
+    slice_id: int,
     note: str | None = None,
     confirm: Callable[[str], bool] = _tty_confirm,
 ) -> dict[str, Any]:
     s = state.read(project_root)
-    if s.get("phase") != "STUCK":
-        return {"ok": False, "reason": "wrong_phase", "phase": s.get("phase"), "expected": "STUCK"}
-    if not confirm("Unstick and let the AI retry this slice? [y/N] "):
+    sl = state.find_slice(s, slice_id)
+    if sl is None:
+        return {"ok": False, "reason": "slice_not_found", "slice_id": slice_id}
+    if sl.get("status") != "stuck":
+        return {"ok": False, "reason": "not_stuck", "slice_id": slice_id, "status": sl.get("status")}
+    if not confirm(f"Unstick slice {slice_id} and let the AI retry it? [y/N] "):
         return {"ok": False, "reason": "not_confirmed"}
-
-    def mut(st: dict[str, Any]) -> None:
-        cs = state.current_slice(st)
-        if cs:
-            cs["verify_fail_count"] = 0
-            cs["status"] = "implement"
-
-    try:
-        state.transition(s, "SLICE_IMPLEMENT", expect="STUCK", mutator=mut)
-    except state.TransitionDenied as e:
-        return e.payload
+    sl["verify_fail_count"] = 0
+    sl["status"] = "implement"
     state.write(project_root, s)
-    gatelog.append_gate_event(project_root, "harness_unstick", {"note": note or ""})
-    return {"ok": True, "phase": "SLICE_IMPLEMENT"}
+    gatelog.append_gate_event(project_root, "harness_unstick", {"slice_id": slice_id, "note": note or ""})
+    return {"ok": True, "slice_id": slice_id, "slice_status": "implement"}
 
 
 def cmd_reslice(
@@ -163,7 +157,6 @@ def cmd_reslice(
 
     def mut(st: dict[str, Any]) -> None:
         st["slices"] = []
-        st["current_slice"] = None
         st["approved"] = None
         st["scale"] = None
         st["scale_source"] = None
@@ -179,7 +172,6 @@ def cmd_reslice(
 
 def cmd_status(project_root: str) -> dict[str, Any]:
     s = state.read(project_root)
-    cs = state.current_slice(s)
     return {
         "phase": s.get("phase"),
         "feature": (s.get("feature") or {}).get("desc"),
@@ -187,13 +179,13 @@ def cmd_status(project_root: str) -> dict[str, Any]:
         "scale_source": s.get("scale_source"),
         "risky": s.get("risky"),
         "read_policy": s.get("read_policy"),
-        "current_slice": s.get("current_slice"),
+        "active_slices": [x.get("id") for x in state.active_slices(s)],
         "slices": [
             {"id": x.get("id"), "title": x.get("title"), "status": x.get("status"),
-             "fails": x.get("verify_fail_count", 0)}
+             "module": x.get("module"), "fails": x.get("verify_fail_count", 0),
+             "authorship": x.get("authorship")}
             for x in s.get("slices", [])
         ],
-        "current_authorship": (cs or {}).get("authorship"),
     }
 
 
@@ -215,7 +207,8 @@ def build_parser() -> argparse.ArgumentParser:
     se.add_argument("--file")
     se.add_argument("--text")
 
-    su = sub.add_parser("unstick", help="release a STUCK slice for one more try")
+    su = sub.add_parser("unstick", help="release a stuck slice for one more try")
+    su.add_argument("slice_id", type=int)
     su.add_argument("--note")
 
     sr = sub.add_parser("reslice", help="discard slices and re-slice the feature")
@@ -233,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "explain":
         result = cmd_explain(root, args.slice_id, file=args.file, text=args.text)
     elif args.command == "unstick":
-        result = cmd_unstick(root, note=args.note)
+        result = cmd_unstick(root, args.slice_id, note=args.note)
     elif args.command == "reslice":
         result = cmd_reslice(root, note=args.note)
     elif args.command == "status":

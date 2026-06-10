@@ -21,37 +21,29 @@ from typing import Any, Callable
 
 STATE_DIRNAME = ".harness"
 STATE_FILENAME = "state.json"
-STATE_VERSION = 1
+STATE_VERSION = 2
 
+# Feature-level phases. Individual slices carry their own status (below) so
+# that several slices can be in progress at once.
 PHASES = (
     "NO_FEATURE",
     "DISCOVERY",
     "SLICING",
     "AWAITING_APPROVAL",
-    "SLICE_SCOPING",
-    "SLICE_IMPLEMENT",
-    "SLICE_VERIFY",
-    "STUCK",
+    "IN_PROGRESS",
     "FEATURE_DONE",
 )
 
-# from_phase -> set of legal to_phases
+# Per-slice status (parallel): many slices may be `implement` at the same time.
+SLICE_STATUSES = ("proposed", "implement", "stuck", "done")
+
+# from_phase -> set of legal to_phases (feature level)
 LEGAL_TRANSITIONS: dict[str, set[str]] = {
     "NO_FEATURE": {"SLICING", "DISCOVERY"},
     "DISCOVERY": {"AWAITING_APPROVAL", "SLICING"},
     "SLICING": {"AWAITING_APPROVAL"},
-    "AWAITING_APPROVAL": {"SLICING", "DISCOVERY", "SLICE_SCOPING"},
-    "SLICE_SCOPING": {"SLICE_IMPLEMENT", "SLICING", "DISCOVERY"},
-    "SLICE_IMPLEMENT": {"SLICE_VERIFY", "SLICING", "DISCOVERY"},
-    "SLICE_VERIFY": {
-        "SLICE_SCOPING",
-        "FEATURE_DONE",
-        "SLICE_IMPLEMENT",
-        "STUCK",
-        "SLICING",
-        "DISCOVERY",
-    },
-    "STUCK": {"SLICE_IMPLEMENT", "SLICING", "DISCOVERY"},
+    "AWAITING_APPROVAL": {"SLICING", "DISCOVERY", "IN_PROGRESS"},
+    "IN_PROGRESS": {"FEATURE_DONE", "SLICING", "DISCOVERY"},
     "FEATURE_DONE": {"SLICING", "DISCOVERY"},
 }
 
@@ -102,7 +94,6 @@ def new_state() -> dict[str, Any]:
         "read_policy": None,
         "discovery_summary": None,
         "slices": [],
-        "current_slice": None,
         "approved": None,
         "updated_at": _now(),
     }
@@ -181,12 +172,19 @@ def transition(
     return state
 
 
-def current_slice(state: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the slice dict pointed to by current_slice, or None."""
-    cur = state.get("current_slice")
-    if cur is None:
-        return None
+def find_slice(state: dict[str, Any], slice_id: Any) -> dict[str, Any] | None:
+    """Return the slice with the given id, or None."""
     for s in state.get("slices", []):
-        if s.get("id") == cur:
+        if s.get("id") == slice_id:
             return s
     return None
+
+
+def active_slices(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Slices currently being implemented (editable). May be several at once."""
+    return [s for s in state.get("slices", []) if s.get("status") == "implement"]
+
+
+def all_done(state: dict[str, Any]) -> bool:
+    slices = state.get("slices", [])
+    return bool(slices) and all(s.get("status") == "done" for s in slices)
